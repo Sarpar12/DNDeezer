@@ -238,7 +238,7 @@ def _parse_artist(data: Any) -> DeezerArtist:
 
     return DeezerArtist(
         id=_as_int(data.get("id")),
-        name=str(data.get("name") or ""),
+        name=str(data.get("name") or "").rstrip(":"),
     )
 
 
