@@ -1,6 +1,7 @@
-import pytest 
+import pytest
 
-from deezer.client import DeezerAuthError, DeezerClient
+from dndeezer.deezer.client import DeezerClient
+
 
 class FakeResponse:
     def __init__(self, data, status_code=200):

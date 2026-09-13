@@ -3,7 +3,7 @@ import os
 
 import httpx
 
-from deezer.client import DeezerClient
+from dndeezer.deezer.client import DeezerClient
 
 
 async def main():
