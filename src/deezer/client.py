@@ -102,10 +102,7 @@ class DeezerClient:
         *,
         limit: int = 25,
     ) -> list[DeezerAlbum]:
-        query = (
-            f'artist:"{_escape_query(artist)}" '
-            f'album:"{_escape_query(album)}"'
-        )
+        query = f"{artist} {album}"
 
         data = await self._get(
             "/search/album",
@@ -116,6 +113,7 @@ class DeezerClient:
         )
 
         results = data.get("data", [])
+
         if not isinstance(results, list):
             return []
 
@@ -132,10 +130,7 @@ class DeezerClient:
         *,
         limit: int = 25,
     ) -> list[DeezerTrack]:
-        query = (
-            f'artist:"{_escape_query(artist)}" '
-            f'track:"{_escape_query(track)}"'
-        )
+        query = f"{artist} {track}"
 
         data = await self._get(
             "/search/track",
@@ -146,6 +141,7 @@ class DeezerClient:
         )
 
         results = data.get("data", [])
+
         if not isinstance(results, list):
             return []
 
