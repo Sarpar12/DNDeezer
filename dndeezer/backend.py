@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 DownloadKind = Literal["album", "track"]
-BackendState = Literal["queued, downloading, completed, failed, cancelled"]
+BackendState = Literal["queued", "downloading", "completed", "failed", "cancelled"]
 
 
 @dataclass(frozen=True, slots=True)
