@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from .models import (
@@ -47,11 +50,16 @@ class DeezerApiError(DeezerError):
 class DeezerClient:
     API_BASE = "https://api.deezer.com"
     GW_URL = "https://www.deezer.com/ajax/gw-light.php"
+    RETRYABLE_STATUS_CODES = (429, 503)
 
     def __init__(
         self,
         http: AsyncHttpClient,
         arl: str,
+        *,
+        min_interval: float = 0.2,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
     ) -> None:
         if not arl:
             raise ValueError("Deezer ARL is required")
@@ -59,6 +67,11 @@ class DeezerClient:
         self._http = http
         self._arl = arl
         self._api_token: str | None = None
+        self._min_interval = min_interval
+        self._max_retries = max(1, max_retries)
+        self._retry_delay = retry_delay
+        self._request_lock = asyncio.Lock()
+        self._last_request_at = 0.0
 
     @property
     def api_token(self) -> str | None:
@@ -166,7 +179,20 @@ class DeezerClient:
         album_id: int | str,
     ) -> list[dict[str, Any]]:
         data = await self._get(f"/album/{album_id}")
+        return await self._collect_tracklist(album_id, data)
 
+    async def get_album_with_tracklist(
+        self,
+        album_id: int | str,
+    ) -> tuple[DeezerAlbum, list[dict[str, Any]]]:
+        data = await self._get(f"/album/{album_id}")
+        return _parse_album(data), await self._collect_tracklist(album_id, data)
+
+    async def _collect_tracklist(
+        self,
+        album_id: int | str,
+        data: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         tracklist_url = data.get("tracklist")
         if not tracklist_url:
             raise DeezerApiError(
@@ -206,13 +232,40 @@ class DeezerClient:
             params=params,
         )
 
+    async def _throttle(self) -> None:
+        async with self._request_lock:
+            wait = self._min_interval - (time.monotonic() - self._last_request_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request_at = time.monotonic()
+
+    async def _send(
+        self,
+        request: Callable[..., Awaitable[ResponseLike]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> ResponseLike:
+        for attempt in range(self._max_retries):
+            await self._throttle()
+            response = await request(*args, **kwargs)
+
+            if response.status_code not in self.RETRYABLE_STATUS_CODES:
+                return response
+            if attempt == self._max_retries - 1:
+                return response
+
+            await asyncio.sleep(self._retry_delay * (2**attempt))
+
+        raise AssertionError("unreachable")
+
     async def _get_url(
         self,
         url: str,
         *,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = await self._http.get(
+        response = await self._send(
+            self._http.get,
             url,
             params=params,
         )
@@ -242,7 +295,8 @@ class DeezerClient:
         *,
         api_token: str | None = None,
     ) -> dict[str, Any]:
-        response = await self._http.post(
+        response = await self._send(
+            self._http.post,
             self.GW_URL,
             params={
                 "api_version": "1.0",
