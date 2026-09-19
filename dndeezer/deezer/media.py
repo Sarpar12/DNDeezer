@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
 from dndeezer.backend import DownloadTarget
 from dndeezer.deezer.client import DeezerClient, DeezerError
+from dndeezer.deezer.models import DeezerSession
 
 ProgressCallback = Callable[[float], None]
 
@@ -100,8 +101,10 @@ class DirectDeezerMediaService:
         destination: Path,
         *,
         on_progress: ProgressCallback | None = None,
+        session: DeezerSession | None = None,
     ) -> list[Path]:
-        session = await self.client.authenticate()
+        if session is None:
+            session = await self.client.authenticate()
         track = await self.client._get(f"/track/{track_id}")
         used_id = _track_id(track)
 
@@ -183,7 +186,7 @@ class DirectDeezerMediaService:
 
     async def _page_data(
         self,
-        session: Any,
+        session: DeezerSession,
         track_id: int,
     ) -> dict[str, Any]:
         try:

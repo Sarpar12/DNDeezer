@@ -22,6 +22,7 @@ from dndeezer.deezer.media import (
     _select_media_source,
     _track_id,
 )
+from dndeezer.deezer.models import DeezerSession
 
 BF_SECRET = b"g4el58wc0zvf9na1"
 BF_IV = bytes(range(8))
@@ -500,6 +501,57 @@ async def test_cdn_get_sends_user_agent(tmp_path):
 
     assert cdn_url == "https://cdn.test/flac"
     assert kwargs["headers"] == {"User-Agent": "Mozilla/5.0"}
+
+
+@pytest.mark.asyncio
+async def test_acquire_track_with_session_skips_authenticate(tmp_path):
+    service, http = _make_service()
+    session = DeezerSession(
+        user_id=1,
+        country="US",
+        api_token="csrf-shared",
+        license_token="lic-shared",
+    )
+
+    # No getUserData queued: if the code tried to authenticate, the
+    # response queue would run dry and the test would fail.
+    http.queue_get(FakeResponse(_track_response()))
+    http.queue_post(_page_track_response())
+    http.queue_post(_media_api_response())
+    http.queue_get(FakeResponse(pieces=[]))
+
+    await service._acquire_track(100, tmp_path, session=session)
+
+    auth_calls = [
+        (url, kwargs)
+        for url, kwargs in http.post_calls
+        if (kwargs.get("params") or {}).get("method") == "deezer.getUserData"
+    ]
+    assert auth_calls == []
+
+    media_url, kwargs = http.post_calls[-1]
+    assert media_url == "https://media.deezer.com/v1/get_url"
+    assert kwargs["json"]["license_token"] == "lic-shared"
+
+
+@pytest.mark.asyncio
+async def test_acquire_track_without_session_authenticates_once(tmp_path):
+    service, http = _make_service()
+
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_track_response()))
+    http.queue_post(_page_track_response())
+    http.queue_post(_media_api_response())
+    http.queue_get(FakeResponse(pieces=[]))
+
+    await service._acquire_track(100, tmp_path)
+
+    auth_calls = [
+        kwargs
+        for _, kwargs in http.post_calls
+        if (kwargs.get("params") or {}).get("method") == "deezer.getUserData"
+    ]
+    assert len(auth_calls) == 1
 
 
 @pytest.mark.asyncio
