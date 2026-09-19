@@ -161,6 +161,36 @@ class DeezerClient:
         data = await self._get(f"/album/{album_id}")
         return _parse_album(data)
 
+    async def get_album_tracklist(
+        self,
+        album_id: int | str,
+    ) -> list[dict[str, Any]]:
+        data = await self._get(f"/album/{album_id}")
+
+        tracklist_url = data.get("tracklist")
+        if not tracklist_url:
+            raise DeezerApiError(
+                f"Deezer album {album_id} response has no tracklist URL"
+            )
+
+        tracks: list[dict[str, Any]] = []
+        next_url = f"{tracklist_url}?limit=1000"
+
+        while next_url:
+            page = await self._get_url(next_url)
+
+            page_tracks = page.get("data")
+            if not isinstance(page_tracks, list):
+                break
+
+            tracks.extend(
+                item for item in page_tracks if isinstance(item, dict)
+            )
+
+            next_url = str(page.get("next") or "")
+
+        return tracks
+
     async def get_track(self, track_id: int | str) -> DeezerTrack:
         data = await self._get(f"/track/{track_id}")
         return _parse_track(data)
@@ -171,8 +201,19 @@ class DeezerClient:
         *,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = await self._http.get(
+        return await self._get_url(
             f"{self.API_BASE}{path}",
+            params=params,
+        )
+
+    async def _get_url(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self._http.get(
+            url,
             params=params,
         )
 
