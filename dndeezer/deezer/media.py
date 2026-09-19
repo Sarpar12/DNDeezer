@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
 from dndeezer.backend import DownloadTarget
 from dndeezer.deezer.client import DeezerClient, DeezerError
-from dndeezer.deezer.models import DeezerSession
+from dndeezer.deezer.models import DeezerAlbum, DeezerSession
 
 ProgressCallback = Callable[[float], None]
 
@@ -102,6 +102,7 @@ class DirectDeezerMediaService:
         *,
         on_progress: ProgressCallback | None = None,
         session: DeezerSession | None = None,
+        stem: str | None = None,
     ) -> list[Path]:
         if session is None:
             session = await self.client.authenticate()
@@ -147,13 +148,17 @@ class DirectDeezerMediaService:
         try:
             media_response.raise_for_status()
             media_data = media_response.json()
+        except Exception as exc:
+            raise MediaAcquisitionError(
+                f"Failed to resolve media for track {used_id}: {exc}"
+            ) from exc
         finally:
             await _close_response(media_response)
 
         url, quality = _select_media_source(media_data)
         cdn_response = await self.client._http.get(url, headers=CDN_HEADERS)
         temporary_path = destination / f".{used_id}.part"
-        output_path = destination / _filename(track, quality)
+        output_path = destination / _filename(track, quality, stem=stem)
 
         try:
             cdn_response.raise_for_status()
@@ -298,12 +303,42 @@ def _select_media_source(data: Any) -> tuple[str, str]:
     raise MediaAcquisitionError("Deezer returned no media sources")
 
 
-def _filename(track: dict[str, Any], quality: str) -> str:
-    artist = (track.get("artist") or {}).get("name", "")
-    title = track.get("title", "track")
-    stem = " - ".join(str(value) for value in (artist, title) if value).strip()
-    safe = "".join(char if char.isalnum() or char in " -()[]" else "_" for char in stem)
-    return f"{safe.strip() or 'track'}{'.flac' if quality == 'FLAC' else '.mp3'}"
+def _safe_component(value: str) -> str:
+    return "".join(
+        char if char.isalnum() or char in " -()[]" else "_" for char in value
+    ).strip()
+
+
+def _filename(
+    track: dict[str, Any],
+    quality: str,
+    *,
+    stem: str | None = None,
+) -> str:
+    if stem is None:
+        artist = (track.get("artist") or {}).get("name", "")
+        title = track.get("title", "track")
+        stem = " - ".join(str(value) for value in (artist, title) if value)
+
+    safe = _safe_component(stem)
+    return f"{safe or 'track'}{'.flac' if quality == 'FLAC' else '.mp3'}"
+
+
+def _wrap_album_progress(
+    on_progress: ProgressCallback | None,
+    *,
+    total: int,
+    position: int,
+) -> ProgressCallback | None:
+    if on_progress is None:
+        return None
+
+    def report(percent: float) -> None:
+        clamped = min(max(float(percent), 0.0), 100.0)
+        overall = (position - 1 + clamped / 100.0) * 100.0 / total
+        on_progress(min(overall, 100.0))
+
+    return report
 
 
 def _content_length(response: Any) -> int | None:
