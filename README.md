@@ -1,5 +1,5 @@
 # Plugin
-This plugin provides downloading support from Deezer, quality limited by account max. 
+This plugin provides downloading support from Deezer, quality limited by account max.
 
 ## Architecture
 
@@ -31,6 +31,20 @@ flowchart TD
 	 Files --> Backend
 	 Backend --> Host
 ```
+
+`build_direct_backend()` in `backends/direct.py` is the single wiring point:
+it assembles the `DeezerClient`, the `DirectDeezerMediaService`, and the
+`DirectDeezerBackend` from the host's HTTP client, ARL, and downloads
+directory.
+
+### Client behaviour
+
+All Deezer API and gateway calls go through one `DeezerClient` per job, which:
+
+- authenticates via `deezer.getUserData` and caches the session
+  (`checkForm`/license tokens) for the client's lifetime;
+- throttles outgoing requests to one per `min_interval` (default 200 ms);
+- retries `429`/`503` responses with exponential backoff (3 attempts).
 
 ### Search path
 
@@ -87,8 +101,24 @@ using Deezer's fallback ID, ISRC search, or artist/title search. The ID actually
 used for media is retained because it is also used to derive the decryption key.
 
 The URL response is checked in quality order: FLAC, MP3 320, then MP3 128.
-The CDN response is streamed, and the output is only reported as complete after
-all transformed bytes have been written.
+Only the `BF_CBC_STRIPE` cipher is accepted. The CDN response is streamed, and
+the output is only reported as complete after all transformed bytes have been
+written.
+
+### Album downloads
+
+An `album:<id>` payload reuses the same track pipeline:
+
+1. One authentication is shared by the whole album.
+2. Album metadata and the full tracklist come from a single
+	`GET /album/{id}` call, with the tracklist fetched through its `tracklist`
+	URL using `?limit=1000` plus `next` pagination.
+3. Tracks download sequentially into a sanitized
+	`Artist - Album/` directory below the job destination, named
+	`NN - Title.ext` with zero-padded track positions.
+4. Per-track progress is rescaled to the whole album.
+5. A failed track is skipped; the job only fails if the album produces no
+	files at all, in which case the first failure reason is reported.
 
 ### Ownership boundaries
 
@@ -96,11 +126,42 @@ all transformed bytes have been written.
 | --- | --- |
 | `plugin.py` | Host plugin entry point |
 | `indexer.py` | Search, scoring, and host result conversion |
-| `deezer/client.py` | Deezer HTTP calls, authentication, and JSON parsing |
+| `deezer/client.py` | Deezer HTTP calls, authentication, throttling, retries, and JSON parsing |
 | `deezer/models.py` | Typed Deezer domain objects |
 | `backend.py` | Download contracts, job values, and payload parsing |
-| `backends/direct.py` | Async job lifecycle and filesystem readiness |
-| `deezer/media.py` | Media acquisition and progress reporting |
+| `backends/direct.py` | Async job lifecycle, filesystem readiness, and `build_direct_backend()` wiring |
+| `deezer/media.py` | Media acquisition (tracks and albums) and progress reporting |
+
+## Configuration
+
+`plugin.toml` declares a single admin setting, `arl` (the Deezer ARL cookie,
+stored as a secret), which both the indexer and the download backend read.
+
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
+
+```sh
+uv sync --frozen        # install locked dependencies, including dev group
+uv run ruff check .     # lint
+uv run pytest tests/ -q # test suite (93 tests)
+```
+
+The pipeline tests fake only the HTTP transport, so the client, media service,
+and backend run for real — including two end-to-end tests that drive
+`parse_payload("track:…")` and `parse_payload("album:…")` through the whole
+stack (`tests/test_integration.py`). `scripts/live.py` is a manual smoke script that
+hits the live Deezer API with `DEEZER_ARL` set.
+
+CI (`.forgejo/workflows/ci.yml`) runs the lint and test commands above on
+every push and pull request.
+
+## Known limitations
+
+- No metadata or cover-art embedding; files are written as raw decrypted audio.
+- `plugin.py` and `indexer.py` import host modules
+	(`infrastructure.plugins.protocols`, `models.common`) that are not part of
+	this repository, so they can only be imported inside the host application.
 
 ## Acknowledgements
 

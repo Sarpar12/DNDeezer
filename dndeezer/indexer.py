@@ -9,7 +9,7 @@ from models.common import ServiceStatus
 from .deezer.client import DeezerClient
 from .deezer.models import DeezerAlbum, DeezerTrack
 
-SOURCE = "plugin:dndeezer"
+SOURCE = "plugin:deezer-download"
 
 
 class DeezerIndexer:

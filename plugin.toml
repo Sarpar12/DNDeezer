@@ -1,13 +1,17 @@
 [plugin]
-name = "Deezer-Download"            # unique id: lowercase kebab-case in v1
+name = "deezer-download"          # unique id: lowercase kebab-case in v1
 display_name = "Deezer Download"
 version = "0.0.1"
 api_version = 1
-entrypoint = "plugin:DNDeezer"     # <module>:<ClassName>
-capabilities = ["download_client"]
-description = "Enables downloading music from Deezer(limited to your account cap)"
+entrypoint = "plugin:DNDeezer"    # <module>:<ClassName>
+capabilities = ["indexer"]
+description = "Search Deezer for albums and tracks (downloads limited to your account max)."
 author = "Sarpar12"
 homepage = "https://acme-music.test"
+
+[[capability]]
+id = "indexer"
+target_source = "plugin:deezer-download"   # indexer-only plugins must pin their target
 
 [[settings]]                   # admin-editable fields
 key = "arl"
