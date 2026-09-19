@@ -3,14 +3,14 @@ name = "Deezer-Download"            # unique id: lowercase kebab-case in v1
 display_name = "Deezer Download"
 version = "0.0.1"
 api_version = 1
-entrypoint = "plugin:Downloader"   # <module>:<ClassName>
+entrypoint = "plugin:DNDeezer"     # <module>:<ClassName>
 capabilities = ["download_client"]
 description = "Enables downloading music from Deezer(limited to your account cap)"
 author = "Sarpar12"
 homepage = "https://acme-music.test"
 
-[[settings]]                   # optional, repeatable: admin-editable fields
-key = "webhook_url"
-label = "Webhook URL"
-help = "Shown under the field in Settings."
-secret = false                 # true = encrypted at rest, masked, sentinel saves
+[[settings]]                   # admin-editable fields
+key = "arl"
+label = "Deezer ARL"
+help = "Deezer request cookie used for authenticated API calls."
+secret = true                  # encrypted at rest, masked, sentinel saves

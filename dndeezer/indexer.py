@@ -95,7 +95,7 @@ class DeezerIndexer:
         *,
         timeout: float = 30.0
     ) -> list[IndexerResult]:
-        if not self.is_configured:
+        if not self.is_configured():
             return []
 
         try:

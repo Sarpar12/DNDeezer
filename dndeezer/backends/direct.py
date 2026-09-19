@@ -16,6 +16,7 @@ from dndeezer.backend import (
 )
 from dndeezer.deezer.client import DeezerClient
 from dndeezer.deezer.media import (
+    DirectDeezerMediaService,
     MediaAcquirer,
     MediaAcquisitionError,
 )
@@ -445,3 +446,28 @@ class DirectDeezerBackend:
             return True
         except OSError:
             return False
+
+
+def build_direct_backend(
+    *,
+    http,
+    arl: str,
+    downloads_dir: Path,
+    logger: logging.Logger | None = None,
+    client: DeezerClient | None = None,
+) -> DirectDeezerBackend:
+    """Wire a DirectDeezerBackend from host-provided pieces.
+
+    ``http`` and ``arl`` are the same host async HTTP client and Deezer ARL
+    the indexer uses. Pass ``client`` to share an authenticated
+    ``DeezerClient`` (and its request throttling) with other components.
+    """
+    if client is None:
+        client = DeezerClient(http, arl)
+
+    return DirectDeezerBackend(
+        client=client,
+        media=DirectDeezerMediaService(client),
+        downloads_dir=downloads_dir,
+        logger=logger,
+    )
