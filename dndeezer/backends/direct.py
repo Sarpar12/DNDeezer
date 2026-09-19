@@ -69,7 +69,7 @@ class DirectDeezerBackend:
     ) -> BackendHealth:
         try:
             await self.client.authenticate()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - health check reports, never raises
             return BackendHealth(
                 ok=False,
                 message=(

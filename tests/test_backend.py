@@ -1,8 +1,6 @@
 import pytest
 
-from dndeezer.backend import (
-    DownloadTarget, parse_payload
-)
+from dndeezer.backend import DownloadTarget, parse_payload
 
 
 def test_parse_album_payload():

@@ -4,8 +4,8 @@ import asyncio
 from difflib import SequenceMatcher
 
 from infrastructure.plugins.protocols import IndexerResult, PluginSearchResult
-
 from models.common import ServiceStatus
+
 from .deezer.client import DeezerClient
 from .deezer.models import DeezerAlbum, DeezerTrack
 
@@ -36,7 +36,7 @@ class DeezerIndexer:
         try:
             async with asyncio.timeout(10):
                 session = await self._client().authenticate()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - error boundary, never crash the host
             return ServiceStatus(
                 status="error", message=f"Deezer authentication failed: {exc}"
             )
@@ -62,7 +62,7 @@ class DeezerIndexer:
                 albums = await self._client().search_albums(
                     artist_name, album_title
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - search must degrade to empty results
             self.ctx.logger.warning("Deezer album search failed: %s", exc)
             return []
 
@@ -103,7 +103,7 @@ class DeezerIndexer:
                 tracks = await self._client().search_tracks(
                     artist_name, track_title
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - search must degrade to empty results
             self.ctx.logger.warning("Deezer track search failed: %s", exc,)
             return []
 
