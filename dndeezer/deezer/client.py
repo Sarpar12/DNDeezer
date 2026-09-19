@@ -89,10 +89,16 @@ class DeezerClient:
 
         self._api_token = api_token
 
+        options = user.get("OPTIONS")
+        license_token = ""
+        if isinstance(options, dict):
+            license_token = str(options.get("license_token") or "")
+
         return DeezerSession(
             user_id=user_id,
             country=str(results.get("COUNTRY") or ""),
             api_token=api_token,
+            license_token=license_token,
         )
 
     async def search_albums(

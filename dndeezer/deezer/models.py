@@ -6,6 +6,7 @@ class DeezerSession:
     user_id: int
     country: str
     api_token: str
+    license_token: str = ""
 
 
 @dataclass(frozen=True, slots=True)
