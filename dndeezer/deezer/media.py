@@ -6,7 +6,8 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
+from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
 from dndeezer.backend import DownloadTarget
 from dndeezer.deezer.client import DeezerClient, DeezerError
@@ -17,7 +18,9 @@ MEDIA_API = "https://media.deezer.com/v1/get_url"
 BF_SECRET = b"g4el58wc0zvf9na1"
 BF_IV = bytes(range(8))
 CHUNK_SIZE = 2048
+CIPHER = "BF_CBC_STRIPE"
 QUALITY_PRIORITY = ("FLAC", "MP3_320", "MP3_128")
+CDN_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 
 class MediaAcquisitionError(Exception):
@@ -129,7 +132,10 @@ class DirectDeezerMediaService:
                 "license_token": session.license_token,
                 "media": [{
                     "type": "FULL",
-                    "formats": list(QUALITY_PRIORITY),
+                    "formats": [
+                        {"cipher": CIPHER, "format": quality}
+                        for quality in QUALITY_PRIORITY
+                    ],
                 }],
                 "track_tokens": [track_token],
             },
@@ -142,7 +148,7 @@ class DirectDeezerMediaService:
             await _close_response(media_response)
 
         url, quality = _select_media_source(media_data)
-        cdn_response = await self.client._http.get(url)
+        cdn_response = await self.client._http.get(url, headers=CDN_HEADERS)
         temporary_path = destination / f".{used_id}.part"
         output_path = destination / _filename(track, quality)
 
@@ -200,24 +206,51 @@ class DirectDeezerMediaService:
         track: dict[str, Any],
         page_data: dict[str, Any],
     ) -> int | None:
+        original_id = track.get("id")
+
         fallback = (page_data.get("FALLBACK") or {}).get("SNG_ID")
-        if fallback:
-            return int(fallback)
+        if fallback not in (None, "", "0", 0):
+            try:
+                fallback_id = int(fallback)
+            except (TypeError, ValueError):
+                fallback_id = None
+            if fallback_id and fallback_id != original_id:
+                return fallback_id
 
         isrc = page_data.get("ISRC") or track.get("isrc")
-        queries = [f"isrc:{isrc}"] if isrc else []
-        artist = (track.get("artist") or {}).get("name", "")
-        queries.append(f"{artist} {track.get('title', '')}".strip())
+        if isrc:
+            candidate = await self._readable_track_by_isrc(str(isrc))
+            if candidate and candidate != original_id:
+                return candidate
 
-        for query in queries:
+        artist = (track.get("artist") or {}).get("name", "")
+        query = f"{artist} {track.get('title', '')}".strip()
+        if query:
             results = await self.client._get(
                 "/search/track",
                 params={"q": query, "limit": 1},
             )
             matches = results.get("data")
             if isinstance(matches, list) and matches:
-                return _track_id(matches[0])
+                candidate = _track_id(matches[0])
+                if candidate != original_id:
+                    return candidate
         return None
+
+    async def _readable_track_by_isrc(self, isrc: str) -> int | None:
+        try:
+            data = await self.client._get(f"/track/isrc:{isrc}")
+        except DeezerError:
+            return None
+
+        if not isinstance(data, dict) or data.get("error"):
+            return None
+        if not data.get("readable", False):
+            return None
+        try:
+            return _track_id(data)
+        except MediaAcquisitionError:
+            return None
 
 
 def _track_id(track: dict[str, Any]) -> int:
@@ -243,7 +276,12 @@ def _select_media_source(data: Any) -> tuple[str, str]:
             if not isinstance(item, dict):
                 continue
             sources = item.get("sources")
-            if item.get("format") and isinstance(sources, list) and sources:
+            if (
+                item.get("format")
+                and item.get("cipher") == CIPHER
+                and isinstance(sources, list)
+                and sources
+            ):
                 url = sources[0].get("url")
                 if url:
                     available[str(item["format"])] = str(url)
@@ -284,7 +322,7 @@ def _blowfish_key(track_id: int) -> bytes:
 
 async def _decrypted_chunks(response: Any, track_id: int) -> AsyncIterator[bytes]:
     decryptor = Cipher(
-        algorithms.Blowfish(_blowfish_key(track_id)),
+        decrepit_algorithms.Blowfish(_blowfish_key(track_id)),
         modes.CBC(BF_IV),
     ).decryptor()
     buffer = b""
