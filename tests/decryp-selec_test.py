@@ -21,8 +21,9 @@ from dndeezer.deezer.media import (
     _filename,
     _select_media_source,
     _track_id,
+    _wrap_album_progress,
 )
-from dndeezer.deezer.models import DeezerSession
+from dndeezer.deezer.models import DeezerAlbum, DeezerArtist, DeezerSession
 
 BF_SECRET = b"g4el58wc0zvf9na1"
 BF_IV = bytes(range(8))
@@ -406,7 +407,7 @@ class FakeHttp:
 
 def _make_service():
     http = FakeHttp()
-    client = DeezerClient(http, "test-arl")
+    client = DeezerClient(http, "test-arl", min_interval=0)
     return DirectDeezerMediaService(client), http
 
 
@@ -687,3 +688,182 @@ async def test_find_alternative_returns_none_when_no_strategy_matches():
     result = await service._find_alternative(_alt_track(7), {})
 
     assert result is None
+
+
+# --- album acquisition ---------------------------------------------------------
+
+def _album_response():
+    return {
+        "id": 9,
+        "title": "Discovery",
+        "nb_tracks": 3,
+        "artist": {"id": 27, "name": "Daft Punk"},
+        "tracklist": "https://api.deezer.com/album/9/tracks",
+    }
+
+
+def _tracklist_items(count):
+    return [
+        {"id": 100 + number, "title": f"Track {number}"}
+        for number in range(1, count + 1)
+    ]
+
+
+def _queue_track(http, track_id):
+    http.queue_get(FakeResponse(_track_response(track_id)))
+    http.queue_post(_page_track_response())
+    http.queue_post(_media_api_response(url=f"https://cdn.test/{track_id}"))
+    http.queue_get(FakeResponse(pieces=[]))
+
+
+@pytest.mark.asyncio
+async def test_acquire_album_end_to_end(tmp_path):
+    service, http = _make_service()
+
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_album_response()))
+    http.queue_get(FakeResponse({"data": _tracklist_items(3)}))
+    for track_id in (101, 102, 103):
+        _queue_track(http, track_id)
+
+    progress: list[float] = []
+    files = await service._acquire_album(9, tmp_path, on_progress=progress.append)
+
+    assert [f.name for f in files] == [
+        "01 - Track 1.flac",
+        "02 - Track 2.flac",
+        "03 - Track 3.flac",
+    ]
+    album_dir = tmp_path / "Daft Punk - Discovery"
+    assert all(f.parent == album_dir and f.is_file() for f in files)
+
+    # Authentication happens once for the whole album.
+    auth_calls = [
+        kwargs
+        for _, kwargs in http.post_calls
+        if (kwargs.get("params") or {}).get("method") == "deezer.getUserData"
+    ]
+    assert len(auth_calls) == 1
+
+    # Progress is monotonic and ends at 100.
+    assert progress == sorted(progress)
+    assert progress[-1] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_acquire_album_continues_after_track_failure(tmp_path):
+    service, http = _make_service()
+
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_album_response()))
+    http.queue_get(FakeResponse({"data": _tracklist_items(2)}))
+
+    _queue_track(http, 101)
+
+    # Track 2's get_url call fails.
+    http.queue_get(FakeResponse(_track_response(102)))
+    http.queue_post(_page_track_response())
+    http.queue_post(FakeResponse({"error": "boom"}, status_code=500))
+
+    files = await service._acquire_album(9, tmp_path)
+
+    assert [f.name for f in files] == ["01 - Track 1.flac"]
+
+
+@pytest.mark.asyncio
+async def test_acquire_album_raises_when_every_track_fails(tmp_path):
+    service, http = _make_service()
+
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_album_response()))
+    http.queue_get(FakeResponse({"data": _tracklist_items(1)}))
+
+    http.queue_get(FakeResponse(_track_response(101)))
+    http.queue_post(_page_track_response())
+    http.queue_post(FakeResponse({"error": "boom"}, status_code=500))
+
+    with pytest.raises(MediaAcquisitionError, match="produced no files"):
+        await service._acquire_album(9, tmp_path)
+
+    # Only an empty (or absent) album directory may be left behind.
+    album_dir = tmp_path / "Daft Punk - Discovery"
+    assert not any(album_dir.iterdir()) if album_dir.exists() else True
+
+
+@pytest.mark.asyncio
+async def test_acquire_album_empty_tracklist_raises(tmp_path):
+    service, http = _make_service()
+
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_album_response()))
+    http.queue_get(FakeResponse({"data": []}))
+
+    with pytest.raises(MediaAcquisitionError, match="no tracks"):
+        await service._acquire_album(9, tmp_path)
+
+
+def _make_album():
+    return DeezerAlbum(
+        id=9,
+        title="Discovery",
+        artist=DeezerArtist(id=27, name="Daft Punk"),
+    )
+
+
+def test_album_directory_creates_sanitized_folder(tmp_path):
+    service, _ = _make_service()
+
+    album_dir = service._album_directory(tmp_path, _make_album())
+
+    assert album_dir == tmp_path / "Daft Punk - Discovery"
+    assert album_dir.is_dir()
+
+
+def test_album_directory_sanitizes_unsafe_names(tmp_path):
+    service, _ = _make_service()
+    album = DeezerAlbum(
+        id=9,
+        title="Greatest / Hits?",
+        artist=DeezerArtist(id=27, name="Daft Punk"),
+    )
+
+    album_dir = service._album_directory(tmp_path, album)
+
+    assert "/" not in album_dir.name
+    assert album_dir.name == "Daft Punk - Greatest _ Hits_"
+
+
+def test_album_directory_rejects_missing_destination(tmp_path):
+    service, _ = _make_service()
+
+    with pytest.raises(MediaAcquisitionError):
+        service._album_directory(tmp_path / "does-not-exist", _make_album())
+
+
+def test_wrap_album_progress_maps_track_percent():
+    seen: list[float] = []
+    report = _wrap_album_progress(seen.append, total=4, position=3)
+
+    report(50)
+
+    assert seen == [62.5]
+
+
+def test_wrap_album_progress_clamps_out_of_range():
+    seen: list[float] = []
+    report = _wrap_album_progress(seen.append, total=2, position=1)
+
+    report(150)
+    report(-20)
+
+    assert seen == [50.0, 0.0]
+
+
+def test_wrap_album_progress_without_callback():
+    assert _wrap_album_progress(None, total=4, position=1) is None
+
+
+def test_filename_uses_explicit_stem():
+    track = {"title": "Ignored", "artist": {"name": "Ignored"}}
+
+    assert _filename(track, "FLAC", stem="01 - Real Song") == "01 - Real Song.flac"

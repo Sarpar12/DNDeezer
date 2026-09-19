@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from dndeezer.deezer.client import DeezerApiError, DeezerClient
@@ -48,7 +50,7 @@ async def test_authenticate_valid_arl():
         },
     })
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
     session = await client.authenticate()
 
     assert session.user_id == 12345
@@ -70,7 +72,7 @@ async def test_search_album():
         }]
     })
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
     albums = await client.search_albums("Daft Punk","Discovery")
 
     assert len(albums) == 1
@@ -99,7 +101,7 @@ async def test_get_album_tracklist_follows_pagination():
         "data": [{"id": 3, "title": "Three"}],
     })
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
     tracks = await client.get_album_tracklist(302127)
 
     assert [t["id"] for t in tracks] == [1, 2, 3]
@@ -111,7 +113,7 @@ async def test_get_album_tracklist_requests_high_limit():
     http.queue({"tracklist": "https://api.deezer.com/album/1/tracks"})
     http.queue({"data": []})
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
     await client.get_album_tracklist(1)
 
     assert http.requested_urls == [
@@ -125,7 +127,7 @@ async def test_get_album_tracklist_without_tracklist_field_raises():
     http = FakeHttp()
     http.queue({"id": 1, "title": "No Tracklist"})
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
 
     with pytest.raises(DeezerApiError):
         await client.get_album_tracklist(1)
@@ -137,7 +139,66 @@ async def test_get_album_tracklist_skips_non_dict_entries():
     http.queue({"tracklist": "https://api.deezer.com/album/1/tracks"})
     http.queue({"data": [{"id": 1}, "junk", None]})
 
-    client = DeezerClient(http, "fake-arl")
+    client = DeezerClient(http, "fake-arl", min_interval=0)
     tracks = await client.get_album_tracklist(1)
 
     assert tracks == [{"id": 1}]
+@pytest.mark.asyncio
+async def test_get_retries_rate_limited_request():
+    http = FakeHttp()
+    http.queue({"error": "slow down"}, status_code=429)
+    http.queue({"id": 1, "title": "Ok"})
+
+    client = DeezerClient(http, "fake-arl", min_interval=0, retry_delay=0)
+    data = await client._get("/track/1")
+
+    assert data["title"] == "Ok"
+    assert len(http.requested_urls) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_gives_up_after_max_retries():
+    http = FakeHttp()
+    for _ in range(3):
+        http.queue({"error": "unavailable"}, status_code=503)
+
+    client = DeezerClient(
+        http,
+        "fake-arl",
+        min_interval=0,
+        max_retries=3,
+        retry_delay=0,
+    )
+
+    with pytest.raises(DeezerApiError):
+        await client._get("/track/1")
+
+    assert len(http.requested_urls) == 3
+
+
+@pytest.mark.asyncio
+async def test_gw_call_retries_rate_limited_request():
+    http = FakeHttp()
+    http.queue({"error": "slow down"}, status_code=503)
+    http.queue({"results": {"checkForm": "csrf", "USER": {"USER_ID": 1}}})
+
+    client = DeezerClient(http, "fake-arl", min_interval=0, retry_delay=0)
+    session = await client.authenticate()
+
+    assert session.api_token == "csrf"
+
+
+@pytest.mark.asyncio
+async def test_min_interval_spaces_requests():
+    http = FakeHttp()
+    http.queue({"id": 1})
+    http.queue({"id": 2})
+
+    client = DeezerClient(http, "fake-arl", min_interval=0.05)
+
+    start = time.monotonic()
+    await client._get("/track/1")
+    await client._get("/track/2")
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.04

@@ -78,22 +78,62 @@ class DirectDeezerMediaService:
         *,
         on_progress: ProgressCallback | None = None,
     ) -> list[Path]:
-        # STEP 4 MEDIA WORK GOES HERE LATER.
-        #
-        # At a high level this method will:
-        #
-        # 1. Resolve album metadata.
-        # 2. Determine its tracks.
-        # 3. Acquire each permitted media item.
-        # 4. Write completed files under `destination`.
-        # 5. Report progress through `on_progress`.
-        # 6. Return final file paths.
-        #
         # Do not return temporary/partial files.
+        session = await self.client.authenticate()
+        album, tracks = await self.client.get_album_with_tracklist(album_id)
 
-        raise NotImplementedError(
-            "Direct Deezer album acquisition is not implemented"
-        )
+        if not tracks:
+            raise MediaAcquisitionError(
+                f"Deezer album {album_id} has no tracks"
+            )
+
+        album_dir = self._album_directory(destination, album)
+
+        total = len(tracks)
+        width = max(2, len(str(total)))
+        files: list[Path] = []
+        failures: list[str] = []
+
+        for position, track in enumerate(tracks, start=1):
+            try:
+                track_files = await self._acquire_track(
+                    _track_id(track),
+                    album_dir,
+                    session=session,
+                    stem=f"{position:0{width}d} - {track.get('title') or 'track'}",
+                    on_progress=_wrap_album_progress(
+                        on_progress,
+                        total=total,
+                        position=position,
+                    ),
+                )
+            except (MediaAcquisitionError, DeezerError) as exc:
+                failures.append(f"track {position}: {exc}")
+                continue
+
+            files.extend(track_files)
+
+        if not files:
+            raise MediaAcquisitionError(
+                f"Deezer album {album_id} produced no files"
+                + (f"; first failure: {failures[0]}" if failures else "")
+            )
+
+        return files
+
+    def _album_directory(self, destination: Path, album: DeezerAlbum) -> Path:
+        dest = Path(destination).expanduser().resolve()
+
+        if not dest.is_dir():
+            raise MediaAcquisitionError(
+                f"Album destination does not exist: {dest}"
+            )
+
+        folder = _safe_component(f"{album.artist.name} - {album.title}")
+        album_dir = dest / (folder or "album")
+        album_dir.mkdir(parents=True, exist_ok=True)
+
+        return album_dir
 
     async def _acquire_track(
         self,
