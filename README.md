@@ -55,6 +55,11 @@ database maintenance.
 
 ## Known limitations
 
+- Track file references include `parent_directory` and `extension` as a
+  compatibility workaround for hosts that persist plugin file references as
+  search results. This avoids the `Object missing required field
+  parent_directory` failure when loading per-file candidates.
+
 - For requests with one expected track, the plugin expands album search results
   into individual track candidates, each with a filename and `track:<id>` payload.
   This lets the host match a missing song without downloading an entire album,

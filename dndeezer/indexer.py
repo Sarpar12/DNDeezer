@@ -5,7 +5,6 @@ import unicodedata
 from difflib import SequenceMatcher
 
 from infrastructure.plugins.protocols import (
-    DownloadFileRef,
     IndexerResult,
     PluginSearchResult,
 )
@@ -13,6 +12,7 @@ from infrastructure.plugins.protocols import (
 # DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
 
+from .compat import SearchFileRef
 from .deezer.client import DeezerClient, _parse_track
 from .deezer.media import _filename
 from .deezer.models import DeezerAlbum, DeezerTrack
@@ -175,7 +175,11 @@ class DeezerIndexer:
             plugin=PluginSearchResult(
                 title=f"{track.artist.name} - {track.album_title}",
                 score=score,
-                files=[DownloadFileRef(username=SOURCE, filename=filename, size=0)],
+                files=[SearchFileRef(
+                    username=SOURCE, filename=filename, size=0,
+                    parent_directory=f"{track.artist.name} - {track.album_title}",
+                    extension="flac",
+                )],
                 payload=f"track:{track.id}",
             ),
         )

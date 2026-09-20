@@ -1,9 +1,10 @@
 """sys.modules stubs for the DroppedNeedle host packages.
 
 ``dndeezer.indexer`` and ``dndeezer.download_client`` import boundary types
-from the host application at runtime (see PLUGINS.md). These dataclasses
+from the host application at runtime (see PLUGINS.md). These boundary stubs
 mirror those shapes so the plugin code is importable - and testable -
 outside the host. Installed before any test module imports them.
+DownloadFileRef uses msgspec, like the host, to test subclass serialisation.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass, field
+
+import msgspec
 
 
 @dataclass
@@ -20,8 +23,7 @@ class ServiceStatus:
     message: str | None = None
 
 
-@dataclass
-class DownloadFileRef:
+class DownloadFileRef(msgspec.Struct):
     username: str = ""
     filename: str = ""
     size: int = 0
