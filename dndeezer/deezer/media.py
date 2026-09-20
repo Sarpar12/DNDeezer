@@ -114,6 +114,12 @@ class DirectDeezerMediaService:
                 )
             except (MediaAcquisitionError, DeezerError) as exc:
                 failures.append(f"track {position}: {exc}")
+                cause = exc.__cause__ or exc
+                logger.warning(
+                    "Deezer album track failed: album_id=%s position=%s/%s "
+                    "track_id=%s error_type=%s",
+                    album_id, position, total, track.get("id"), type(cause).__name__,
+                )
                 continue
 
             files.extend(track_files)
@@ -233,7 +239,7 @@ class DirectDeezerMediaService:
             raise
         except Exception as exc:
             raise MediaAcquisitionError(
-                f"Failed to acquire track {used_id}: {exc}"
+                f"Failed to acquire track {used_id}: {type(exc).__name__}: {exc}"
             ) from exc
         finally:
             await _run_blocking(lambda: temporary_path.unlink(missing_ok=True))

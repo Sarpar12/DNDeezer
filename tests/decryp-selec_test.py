@@ -55,10 +55,10 @@ def test_blowfish_key_differs_per_track():
 
 def _encrypt_plaintext(plaintext: bytes, track_id: int) -> bytes:
     """Produce a Deezer-style encrypted stream for the given plaintext."""
-    encryptor = Cipher(
+    cipher = Cipher(
         decrepit_algorithms.Blowfish(_blowfish_key(track_id)),
         modes.CBC(BF_IV),
-    ).encryptor()
+    )
 
     out = bytearray()
     index = 0
@@ -66,15 +66,33 @@ def _encrypt_plaintext(plaintext: bytes, track_id: int) -> bytes:
     while len(plaintext) - offset >= CHUNK_SIZE:
         chunk = plaintext[offset:offset + CHUNK_SIZE]
         if index % 3 == 0:
-            chunk = encryptor.update(chunk)
+            encryptor = cipher.encryptor()
+            chunk = encryptor.update(chunk) + encryptor.finalize()
         out += chunk
         offset += CHUNK_SIZE
         index += 1
 
     # Trailing partial chunk is stored unencrypted.
     out += plaintext[offset:]
-    encryptor.finalize()
     return bytes(out)
+
+
+def test_stripes_reset_iv_across_network_boundaries():
+    from dndeezer.deezer.media import _StripeDecoder
+
+    # Identical independently encrypted stripes must decode identically,
+    # regardless of the preceding stripe or HTTP chunk boundaries.
+    plaintext = bytes(range(256)) * 8
+    encryptor = Cipher(
+        decrepit_algorithms.Blowfish(_blowfish_key(3135555)), modes.CBC(BF_IV),
+    ).encryptor()
+    encrypted = encryptor.update(plaintext) + encryptor.finalize()
+    wire = encrypted + plaintext * 2 + encrypted + b"partial tail"
+    expected = plaintext * 4 + b"partial tail"
+    for size in (1, 997, 2048, 65536):
+        decoder = _StripeDecoder(3135555)
+        result = b"".join(decoder.update(wire[i:i + size]) for i in range(0, len(wire), size))
+        assert result + decoder.finish() == expected
 
 
 class FakeStreamedResponse:

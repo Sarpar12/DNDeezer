@@ -58,7 +58,8 @@ def make_client(tmp_path: Path, media) -> tuple[DeezerDownloadClient, object]:
     """Adapter wired to a real backend with injected media; skips only the
     Deezer client construction."""
     ctx = FakeContext(
-        {"arl": "test-arl", "downloads_dir": str(tmp_path / "dl")}
+        {"arl": "test-arl", "downloads_dir": str(tmp_path / "dl"),
+         "state_dir": str(tmp_path / "state")}
     )
     adapter = DeezerDownloadClient(ctx)
 
@@ -85,6 +86,73 @@ async def wait_for_status(adapter, handle, wanted, timeout=2.0):
 
 
 # -- identity and configuration --
+
+@pytest.mark.asyncio
+async def test_completed_job_recovers_after_restart_and_setting_change(tmp_path):
+    adapter, _ = make_client(tmp_path, SuccessfulMedia())
+    handle = await adapter.enqueue(
+        EnqueueRequest(task_id="restart", source=SOURCE, payload="track:100")
+    )
+    await wait_for_status(adapter, handle, ("completed",))
+    original = await adapter.inspect_materialization(handle)
+    settings = dict(adapter.ctx.settings, downloads_dir=str(tmp_path / "different"))
+    restarted = DeezerDownloadClient(FakeContext(settings))
+    recovered = await restarted.inspect_materialization(handle)
+    assert recovered.workspace_path == original.workspace_path
+    assert recovered.file_paths == original.file_paths
+    assert recovered.mount_healthy
+    assert (await restarted.get_status(handle)).status == "completed"
+    assert await restarted.get_file_path(handle, Path(original.file_paths[0]).name)
+    assert await restarted.discard_client_artifacts(handle)
+    assert not Path(original.workspace_path).exists()
+    assert await restarted.discard_client_artifacts(handle)
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_retains_record_for_retry(tmp_path, monkeypatch):
+    adapter, _ = make_client(tmp_path, SuccessfulMedia())
+    handle = await adapter.enqueue(
+        EnqueueRequest(task_id="retry", source=SOURCE, payload="track:100")
+    )
+    await wait_for_status(adapter, handle, ("completed",))
+    def denied(*args, **kwargs):
+        raise PermissionError("denied")
+    with monkeypatch.context() as patch:
+        patch.setattr("dndeezer.download_client.shutil.rmtree", denied)
+        assert not await adapter.discard_client_artifacts(handle)
+    assert adapter._store.get(handle.job_name).state == "completed"
+    assert await adapter.discard_client_artifacts(handle)
+
+
+@pytest.mark.asyncio
+async def test_persisted_interrupted_job_can_be_cleaned(tmp_path):
+    adapter, _ = make_client(tmp_path, SuccessfulMedia())
+    await adapter._ensure_store()
+    root = tmp_path / "dl"
+    workspace = root / "interrupted"
+    workspace.mkdir(parents=True)
+    (workspace / "partial").write_bytes(b"partial")
+    adapter._store.create(job_name="old", task_id="old", backend_id="interrupted",
+                          payload="track:1", mount_root=root, workspace_path=workspace)
+    restarted = DeezerDownloadClient(adapter.ctx)
+    handle = TaskHandle(source=SOURCE, job_name="old")
+    assert (await restarted.get_status(handle)).status == "failed"
+    assert (await restarted.inspect_materialization(handle)).mount_healthy
+    assert await restarted.discard_client_artifacts(handle)
+    assert not workspace.exists()
+
+
+@pytest.mark.asyncio
+async def test_immediate_abort_persists_terminal_state(tmp_path):
+    adapter, _ = make_client(tmp_path, SlowMedia())
+    handle = await adapter.enqueue(
+        EnqueueRequest(task_id="cancel", source=SOURCE, payload="track:1")
+    )
+    assert await adapter.abort(handle)
+    assert adapter._store.get(handle.job_name).state == "cancelled"
+    # Mount availability is required even when a cancelled job wrote no files.
+    (tmp_path / "dl").mkdir(exist_ok=True)
+    assert await adapter.discard_client_artifacts(handle)
 
 def test_client_name(tmp_path):
     adapter = DeezerDownloadClient(FakeContext())
@@ -271,10 +339,11 @@ async def test_discard_client_artifacts_removes_job_dir(tmp_path):
     assert await adapter.discard_client_artifacts(handle) is True
     assert not job_dir.exists()
 
-    # Handle is forgotten afterwards.
+    # Cleanup identity survives as a tombstone for repeated host calls.
     status = await adapter.get_status(handle)
     assert status.status == "failed"
-    assert "unknown task" in status.error
+    assert status.error == "cleaned"
+    assert await adapter.discard_client_artifacts(handle) is True
 
 
 # -- composite entrypoint --
