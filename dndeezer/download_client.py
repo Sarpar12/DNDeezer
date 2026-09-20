@@ -5,8 +5,8 @@ adapts ``EnqueueRequest``/``TaskHandle`` calls onto the host-agnostic
 ``DirectDeezerBackend`` (built via ``build_direct_backend``), which owns the
 async job lifecycle and the media pipeline.
 
-Folder mode: results are returned with empty ``files`` lists, so the engine
-imports whole releases through ``list_completed_files``.
+Album results use folder mode; one-track requests expose individual files.
+The opaque payload selects the album or track to acquire in either mode.
 """
 
 from __future__ import annotations

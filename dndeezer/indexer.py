@@ -4,12 +4,17 @@ import asyncio
 import unicodedata
 from difflib import SequenceMatcher
 
-from infrastructure.plugins.protocols import IndexerResult, PluginSearchResult
+from infrastructure.plugins.protocols import (
+    DownloadFileRef,
+    IndexerResult,
+    PluginSearchResult,
+)
 
 # DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
 
 from .deezer.client import DeezerClient
+from .deezer.media import _filename
 from .deezer.models import DeezerAlbum, DeezerTrack
 
 SOURCE = "plugin:deezer-download"
@@ -60,9 +65,11 @@ class DeezerIndexer:
         if not self.is_configured():
             return []
 
+        deadline = asyncio.get_running_loop().time() + timeout
+        client = self._client()
         try:
             async with asyncio.timeout(timeout):
-                albums = await self._client().search_albums(
+                albums = await client.search_albums(
                     artist_name, album_title
                 )
         except Exception as exc:  # noqa: BLE001 - search must degrade to empty results
@@ -114,7 +121,58 @@ class DeezerIndexer:
             ))
 
         results.sort(key=lambda result: result.plugin.score, reverse=True)
+        if track_count == 1:
+            # The host uses search_album for missing-track requests too. Expose
+            # independently downloadable files so its track matcher can choose.
+            # A genuine single works the same way: its sole track is the release.
+            return await self._album_tracks(client, results, deadline)
         return results
+
+    async def _album_tracks(self, client, albums, deadline) -> list[IndexerResult]:
+        results: list[IndexerResult] = []
+        seen: set[int] = set()
+        try:
+            async with asyncio.timeout_at(deadline):
+                for result in albums:
+                    release = result.plugin
+                    album_id = int(release.payload.split(":", 1)[1])
+                    try:
+                        album, tracks = await client.get_album_with_tracklist(album_id)
+                    except Exception as exc:  # noqa: BLE001 - isolate unavailable albums
+                        self.ctx.logger.warning(
+                            "DNDeezer track candidates unavailable: album_id=%s error=%s: %s",
+                            album_id, type(exc).__name__, exc,
+                        )
+                        continue
+                    for track in tracks:
+                        if track.id in seen:
+                            continue
+                        seen.add(track.id)
+                        results.append(self._track_result(track, release.score))
+                        self.ctx.logger.info(
+                            "DNDeezer track candidate: payload=track:%s album_id=%s "
+                            "artist=%s title=%s album=%s",
+                            track.id, album.id, track.artist.name, track.title, album.title,
+                        )
+        except TimeoutError:
+            self.ctx.logger.warning(
+                "DNDeezer track candidate search timed out: candidates=%s", len(results),
+            )
+        # Never fall back to album payloads on failure: that would download
+        # whole releases without matching the requested song again.
+        return results
+
+    def _track_result(self, track: DeezerTrack, score: float) -> IndexerResult:
+        filename = _filename({"artist": {"name": track.artist.name}, "title": track.title}, "FLAC")
+        return IndexerResult(
+            source=SOURCE,
+            plugin=PluginSearchResult(
+                title=f"{track.artist.name} - {track.album_title}",
+                score=score,
+                files=[DownloadFileRef(username=SOURCE, filename=filename, size=0)],
+                payload=f"track:{track.id}",
+            ),
+        )
 
     async def search_track(
         self,
@@ -140,18 +198,8 @@ class DeezerIndexer:
         results: list[IndexerResult] = []
 
         for track in tracks:
-            title = (f"{track.artist.name} - {track.title} ({track.album_title})")
-
-            results.append(IndexerResult(
-                source=SOURCE,
-                plugin=PluginSearchResult(
-                    title=title,
-                    score=self._track_score(
-                        artist_name, track_title, track
-                    ),
-                    files=[],
-                    payload=f"track:{track.id}",
-                ),
+            results.append(self._track_result(
+                track, self._track_score(artist_name, track_title, track),
             ))
 
         return results
