@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -23,6 +26,7 @@ CHUNK_SIZE = 2048
 CIPHER = "BF_CBC_STRIPE"
 QUALITY_PRIORITY = ("FLAC", "MP3_320", "MP3_128")
 CDN_HEADERS = {"User-Agent": "Mozilla/5.0"}
+logger = logging.getLogger(__name__)
 
 
 class MediaAcquisitionError(Exception):
@@ -196,7 +200,19 @@ class DirectDeezerMediaService:
         finally:
             await _close_response(media_response)
 
-        url, quality = _select_media_source(media_data)
+        try:
+            url, quality = _select_media_source(media_data)
+        except MediaAcquisitionError:
+            diagnostic = await _run_blocking(
+                _sanitized_media_response,
+                media_data,
+                (self.client._arl, session.license_token, session.api_token, str(track_token)),
+            )
+            logger.warning(
+                "Deezer media selection failed: track_id=%s http_status=%s response=%s",
+                used_id, media_response.status_code, diagnostic,
+            )
+            raise
         temporary_path = destination / f".{used_id}.part"
         output_path = destination / _filename(track, quality, stem=stem)
 
@@ -308,22 +324,75 @@ def _track_id(track: dict[str, Any]) -> int:
     return value
 
 
+def _sanitized_media_response(data: Any, secrets: tuple[str, ...]) -> str:
+    """Bounded response diagnostics; retain schema/error fields, never credentials.
+
+    Unknown fields (including their names) are omitted. Known request secrets
+    and URLs are also scrubbed from free-text errors before JSON encoding.
+    """
+    allowed = {
+        "data", "error", "errors", "code", "message", "media", "format",
+        "cipher", "type", "media_type", "sources", "provider", "url",
+    }
+    secret_values = sorted({value for value in secrets if value}, key=len, reverse=True)
+
+    def sanitize(value: Any, depth: int = 0) -> Any:
+        if depth > 8:
+            return "[truncated]"
+        if isinstance(value, dict):
+            result = {}
+            omitted = 0
+            for key, item in value.items():
+                if key not in allowed:
+                    omitted += 1
+                else:
+                    result[key] = "[redacted]" if key == "url" else sanitize(item, depth + 1)
+            if omitted:
+                result["_omitted_fields"] = omitted
+            return result
+        if isinstance(value, list):
+            result = [sanitize(item, depth + 1) for item in value[:10]]
+            if len(value) > 10:
+                result.append("[truncated]")
+            return result
+        if isinstance(value, str):
+            for secret in secret_values:
+                value = value.replace(secret, "[redacted]")
+            value = re.sub(r"https?://[^\s\"<>]+", "[redacted-url]", value, flags=re.IGNORECASE)
+            value = re.sub(
+                r"\b(?:arl|[\w-]*token|cookie|authorization)\b[\"']?\s*[:=]\s*[^\r\n]+",
+                "[redacted-credential]", value, flags=re.IGNORECASE,
+            )
+            return value[:500] + ("[truncated]" if len(value) > 500 else "")
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return "[unsupported value]"
+
+    text = json.dumps(sanitize(data), ensure_ascii=True)
+    return text[:8000] + ("[truncated]" if len(text) > 8000 else "")
+
+
 def _select_media_source(data: Any) -> tuple[str, str]:
     items = data.get("data") if isinstance(data, dict) else None
-    media = items[0].get("media") if isinstance(items, list) and items else None
+    first = items[0] if isinstance(items, list) and items else None
+    media = first.get("media") if isinstance(first, dict) else None
     available: dict[str, str] = {}
     if isinstance(media, list):
         for item in media:
             if not isinstance(item, dict):
                 continue
             sources = item.get("sources")
+            cipher = item.get("cipher")
+            if isinstance(cipher, dict):
+                cipher = cipher.get("type")
             if (
                 item.get("format")
-                and item.get("cipher") == CIPHER
+                and cipher == CIPHER
                 and isinstance(sources, list)
                 and sources
             ):
-                url = sources[0].get("url")
+                first_source = sources[0]
+                url = first_source.get("url") if isinstance(first_source, dict) else None
                 if url:
                     available[str(item["format"])] = str(url)
 
