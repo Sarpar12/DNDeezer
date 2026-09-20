@@ -11,10 +11,12 @@ imports whole releases through ``list_completed_files``.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 from infrastructure.plugins.protocols import (
     DownloadMaterialization,
@@ -26,6 +28,8 @@ from infrastructure.plugins.protocols import (
 
 # DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
+
+from db import JobStore
 
 from ._async import run_blocking
 from .backend import BackendJob, parse_payload
@@ -40,9 +44,8 @@ class DeezerDownloadClient:
 
     Handles are correlated by an attempt-specific ``job_name``. Preserve the
     host's candidate suffix and never reuse a name for another backend job.
-    The map is in-memory: after a
-    host restart the asyncio jobs are gone too, so unknown handles are
-    reported as failed instead of hanging the engine.
+    Live jobs are held in memory; SQLite retains ownership and completed
+    evidence across restarts. Interrupted workers are reported as failed.
     """
 
     def __init__(self, context) -> None:
@@ -50,6 +53,26 @@ class DeezerDownloadClient:
         self._backend: DirectDeezerBackend | None = None
         self._handles: dict[str, BackendJob] = {}
         self._issued_handle_names: set[str] = set()
+        state_dir = Path(str(context.settings.get("state_dir") or "/app/config/dndeezer"))
+        self._store = JobStore(state_dir / "jobs.sqlite3")
+        self._store_ready = False
+        self._store_lock = asyncio.Lock()
+
+    async def _ensure_store(self) -> None:
+        async with self._store_lock:
+            if not self._store_ready:
+                await run_blocking(self._store.initialize)
+                # Old async workers must be stopped before replacing this instance.
+                recovered = await run_blocking(self._store.recover_interrupted)
+                self.ctx.logger.info("DNDeezer job registry ready: %s; interrupted=%s",
+                                     self._store.path, recovered)
+                self._store_ready = True
+
+    async def _record(self, handle: TaskHandle):
+        if handle.source != SOURCE:
+            return None
+        await self._ensure_store()
+        return await run_blocking(self._store.get, handle.job_name)
 
     # -- config helpers --
 
@@ -98,6 +121,11 @@ class DeezerDownloadClient:
             )
 
         # Backend health covers authentication AND directory writability.
+        try:
+            await self._ensure_store()
+        except Exception as exc:  # noqa: BLE001 - report storage health to the host
+            return ServiceStatus(status="error", message=f"Job database unavailable: {exc}")
+
         health = await self._get_backend().health_check()
         if not health.ok:
             return ServiceStatus(status="error", message=health.message)
@@ -110,15 +138,27 @@ class DeezerDownloadClient:
         payload = (getattr(request, "payload", "") or "").strip()
         target = parse_payload(payload)  # ValueError -> orchestration error
 
-        job = await self._get_backend().enqueue(
-            task_id=request.task_id,
-            target=target,
-        )
-
+        await self._ensure_store()
         job_name = request.job_name or f"{JOB_NAME_PREFIX}{request.task_id}"
-        if job_name in self._issued_handle_names:
-            job_name = f"{job_name}-{job.backend_id}"
+        if job_name in self._issued_handle_names or await run_blocking(self._store.get, job_name):
+            job_name = f"{job_name}-{uuid4().hex}"
         self._issued_handle_names.add(job_name)
+        backend = self._get_backend()
+
+        async def before_start(job):
+            await run_blocking(
+                self._store.create, job_name=job_name, task_id=job.task_id,
+                backend_id=job.backend_id, payload=payload,
+                mount_root=backend.downloads_dir,
+                workspace_path=backend.downloads_dir / job.backend_id,
+            )
+
+        async def on_finished(status, files):
+            await run_blocking(self._store.update, job_name, state=status.state,
+                               file_paths=tuple(files), error=status.error)
+
+        job = await backend.enqueue(task_id=request.task_id, target=target,
+                                    before_start=before_start, on_finished=on_finished)
         handle = TaskHandle(
             source=SOURCE,
             job_name=job_name,
@@ -134,6 +174,16 @@ class DeezerDownloadClient:
         task_id = self._task_id_for(handle, job)
 
         if job is None:
+            record = await self._record(handle)
+            if record is not None:
+                return DownloadTaskStatus(
+                    task_id=record.task_id,
+                    status="completed" if record.state == "completed" else "failed",
+                    error=record.error or (None if record.state == "completed" else record.state),
+                    files_total=len(record.file_paths),
+                    files_completed=len(record.file_paths) if record.state == "completed" else 0,
+                    progress_percent=100.0 if record.state == "completed" else 0.0,
+                )
             return DownloadTaskStatus(
                 task_id=task_id,
                 status="failed",
@@ -183,9 +233,12 @@ class DeezerDownloadClient:
     async def abort(self, handle: TaskHandle) -> bool:
         job = self._resolve(handle)
         if job is None:
-            return False
+            return await self._record(handle) is not None
 
-        return await self._get_backend().abort(job)
+        aborted = await self._get_backend().abort(job)
+        if aborted:
+            await run_blocking(self._store.update, handle.job_name, state="cancelled")
+        return aborted
 
     # -- DownloadClientProtocol: materialization and files --
 
@@ -195,13 +248,30 @@ class DeezerDownloadClient:
     ) -> DownloadMaterialization:
         job = self._resolve(handle)
         if job is None:
+            record = await self._record(handle)
+            if record is not None:
+                healthy = await run_blocking(self._mount_healthy, record.mount_root)
+                self.ctx.logger.info(
+                    "DNDeezer recovered materialization: job=%s state=%s mount_root=%s mount_healthy=%s",
+                    handle.job_name, record.state, record.mount_root, healthy,
+                )
+                return DownloadMaterialization(
+                    state=("missing" if record.state == "cleaned" else
+                           "completed" if record.state == "completed" else "failed"),
+                    mount_root=str(record.mount_root), mount_healthy=healthy,
+                    workspace_path=str(record.workspace_path),
+                    file_paths=[str(p) for p in record.file_paths] if record.state != "cleaned" else [],
+                )
             self.ctx.logger.warning(
                 "DNDeezer inspect_materialization: unknown handle job=%s "
                 "(known=%s) - reporting missing",
                 getattr(handle, "job_name", ""),
                 sorted(self._handles),
             )
-            return DownloadMaterialization(state="missing")
+            root = self._downloads_dir()
+            healthy = bool(root and await run_blocking(self._mount_healthy, root))
+            return DownloadMaterialization(state="missing", mount_root=str(root) if root else "",
+                                           mount_healthy=healthy)
 
         backend = self._get_backend()
         status = await backend.get_status(job)
@@ -270,8 +340,8 @@ class DeezerDownloadClient:
             return False
 
     async def discard_client_artifacts(self, handle: TaskHandle) -> bool:
-        job = self._resolve(handle)
-        if job is None:
+        record = await self._record(handle)
+        if record is None:
             self.ctx.logger.warning(
                 "DNDeezer discard_client_artifacts: unknown handle job=%s "
                 "(known=%s) - host will retry cleanup",
@@ -280,49 +350,45 @@ class DeezerDownloadClient:
             )
             return False
 
-        backend = self._get_backend()
+        job = self._resolve(handle)
+        if job is not None:
+            status = await self._get_backend().get_status(job)
+            if status.state in ("queued", "downloading"):
+                self.ctx.logger.warning("DNDeezer discard refused for active job=%s", handle.job_name)
+                return False
 
         def discard() -> None:
-            directory = (backend.downloads_dir / job.backend_id).resolve()
-            if directory.is_relative_to(backend.downloads_dir):
-                shutil.rmtree(directory, ignore_errors=True)
-            else:
-                self.ctx.logger.warning(
-                    "DNDeezer discard REFUSED: %s escapes downloads_dir %s",
-                    directory,
-                    backend.downloads_dir,
-                )
-
-        await run_blocking(discard)
-
-        def probe() -> tuple[bool, str | None]:
-            directory = backend.downloads_dir / job.backend_id
+            root = record.mount_root
+            directory = record.workspace_path
+            if (root.resolve() != root or directory.resolve() != directory
+                    or directory.parent != root or directory.name != record.backend_id):
+                raise OSError("Workspace ownership/confinement check failed")
+            # An absent mount is not proof that a workspace has been removed.
+            with os.scandir(root) as entries:
+                next(entries, None)
+            try:
+                directory.lstat()
+            except FileNotFoundError:
+                return
+            if record.state == "cleaned":
+                raise OSError("Previously cleaned workspace has reappeared")
+            shutil.rmtree(directory)
             if directory.exists():
-                try:
-                    remaining = sorted(
-                        entry.name for entry in os.scandir(directory)
-                    )[:10]
-                except OSError as exc:
-                    return True, f"unreadable after discard: {exc}"
-                return True, f"still exists, entries={remaining}"
-            return False, None
+                raise OSError("Workspace still exists after removal")
 
-        still_present, reason = await run_blocking(probe)
-        if still_present:
+        self.ctx.logger.info("DNDeezer discard attempt: job=%s workspace=%s",
+                             handle.job_name, record.workspace_path)
+        try:
+            await run_blocking(discard)
+        except OSError as exc:
             self.ctx.logger.warning(
-                "DNDeezer discard_client_artifacts: workspace for job=%s at %s "
-                "survived rmtree (%s) - host cleanup will keep retrying",
-                handle.job_name,
-                backend.downloads_dir / job.backend_id,
-                reason,
+                "DNDeezer discard failed: job=%s workspace=%s error=%s",
+                handle.job_name, record.workspace_path, exc,
             )
-        else:
-            self.ctx.logger.info(
-                "DNDeezer discard_client_artifacts: removed workspace for job=%s "
-                "at %s",
-                handle.job_name,
-                backend.downloads_dir / job.backend_id,
-            )
+            return False
+
+        await run_blocking(self._store.mark_cleaned, handle.job_name)
+        self.ctx.logger.info("DNDeezer discard complete: job=%s", handle.job_name)
 
         for key, entry in list(self._handles.items()):
             if entry == job:
@@ -333,7 +399,8 @@ class DeezerDownloadClient:
     async def list_completed_files(self, handle: TaskHandle) -> list[Path]:
         job = self._resolve(handle)
         if job is None:
-            return []
+            record = await self._record(handle)
+            return list(record.file_paths) if record and record.state == "completed" else []
 
         return await self._get_backend().list_completed_files(job)
 
@@ -345,6 +412,11 @@ class DeezerDownloadClient:
     ) -> Path | None:
         job = self._resolve(handle)
         if job is None:
+            for file in await self.list_completed_files(handle):
+                if file.name == Path(remote_filename).name:
+                    record = await self._record(handle)
+                    if await run_blocking(lambda file=file, record=record: file.resolve().is_relative_to(record.workspace_path)):
+                        return file
             return None
 
         return await self._get_backend().get_file_path(
