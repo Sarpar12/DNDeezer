@@ -125,14 +125,23 @@ class DirectDeezerMediaService:
                 )
             except (MediaAcquisitionError, DeezerError) as exc:
                 failures.append(f"track {position}: {exc}")
+
                 cause = exc.__cause__ or exc
+
                 logger.warning(
-                    "Deezer album track failed: album_id=%s position=%s/%s "
-                    "track_id=%s error_type=%s",
-                    album_id, position, total, track.get("id"), type(cause).__name__,
+                    "Deezer album track failed: "
+                    "album_id=%s position=%s/%s "
+                    "track_id=%s title=%r "
+                    "error_type=%s error=%s",
+                    album_id,
+                    position,
+                    total,
+                    track.get("id"),
+                    track.get("title"),
+                    type(cause).__name__,
+                    str(exc),
                 )
                 continue
-
             files.extend(track_files)
 
         if not files:
