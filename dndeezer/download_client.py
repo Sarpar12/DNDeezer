@@ -11,6 +11,7 @@ imports whole releases through ``list_completed_files``.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -194,12 +195,39 @@ class DeezerDownloadClient:
     ) -> DownloadMaterialization:
         job = self._resolve(handle)
         if job is None:
+            self.ctx.logger.warning(
+                "DNDeezer inspect_materialization: unknown handle job=%s "
+                "(known=%s) - reporting missing",
+                getattr(handle, "job_name", ""),
+                sorted(self._handles),
+            )
             return DownloadMaterialization(state="missing")
 
         backend = self._get_backend()
         status = await backend.get_status(job)
         workspace = str(backend.downloads_dir / job.backend_id)
         mount_healthy = await run_blocking(self._mount_healthy, backend.downloads_dir)
+
+        self.ctx.logger.info(
+            "DNDeezer inspect_materialization: job=%s state=%s mount_root=%s "
+            "mount_healthy=%s workspace=%s",
+            handle.job_name,
+            status.state,
+            backend.downloads_dir,
+            mount_healthy,
+            workspace,
+        )
+        if not mount_healthy:
+            self.ctx.logger.warning(
+                "DNDeezer mount probe FAILED for %s: exists=%s is_dir=%s "
+                "is_symlink=%s can_read=%s",
+                backend.downloads_dir,
+                backend.downloads_dir.exists(),
+                backend.downloads_dir.is_dir(),
+                backend.downloads_dir.is_symlink(),
+                os.access(backend.downloads_dir, os.R_OK),
+            )
+
         evidence = {
             "mount_root": str(backend.downloads_dir),
             "mount_healthy": mount_healthy,
@@ -226,27 +254,75 @@ class DeezerDownloadClient:
             **evidence,
         )
 
-    @staticmethod
-    def _mount_healthy(directory: Path) -> bool:
+    def _mount_healthy(self, directory: Path) -> bool:
         try:
             with os.scandir(directory) as entries:
                 next(entries, None)
             return True
-        except OSError:
+        except OSError as exc:
+            errno_name = errno.errorcode.get(exc.errno, str(exc.errno))
+            self.ctx.logger.warning(
+                "DNDeezer mount probe OSError on %s: %s (%s)",
+                directory,
+                errno_name,
+                exc,
+            )
             return False
 
     async def discard_client_artifacts(self, handle: TaskHandle) -> bool:
         job = self._resolve(handle)
         if job is None:
+            self.ctx.logger.warning(
+                "DNDeezer discard_client_artifacts: unknown handle job=%s "
+                "(known=%s) - host will retry cleanup",
+                getattr(handle, "job_name", ""),
+                sorted(self._handles),
+            )
             return False
 
         backend = self._get_backend()
+
         def discard() -> None:
             directory = (backend.downloads_dir / job.backend_id).resolve()
             if directory.is_relative_to(backend.downloads_dir):
                 shutil.rmtree(directory, ignore_errors=True)
+            else:
+                self.ctx.logger.warning(
+                    "DNDeezer discard REFUSED: %s escapes downloads_dir %s",
+                    directory,
+                    backend.downloads_dir,
+                )
 
         await run_blocking(discard)
+
+        def probe() -> tuple[bool, str | None]:
+            directory = backend.downloads_dir / job.backend_id
+            if directory.exists():
+                try:
+                    remaining = sorted(
+                        entry.name for entry in os.scandir(directory)
+                    )[:10]
+                except OSError as exc:
+                    return True, f"unreadable after discard: {exc}"
+                return True, f"still exists, entries={remaining}"
+            return False, None
+
+        still_present, reason = await run_blocking(probe)
+        if still_present:
+            self.ctx.logger.warning(
+                "DNDeezer discard_client_artifacts: workspace for job=%s at %s "
+                "survived rmtree (%s) - host cleanup will keep retrying",
+                handle.job_name,
+                backend.downloads_dir / job.backend_id,
+                reason,
+            )
+        else:
+            self.ctx.logger.info(
+                "DNDeezer discard_client_artifacts: removed workspace for job=%s "
+                "at %s",
+                handle.job_name,
+                backend.downloads_dir / job.backend_id,
+            )
 
         for key, entry in list(self._handles.items()):
             if entry == job:
