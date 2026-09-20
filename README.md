@@ -109,6 +109,18 @@ directory.
 
 ### Client behaviour
 
+At most two download jobs run concurrently per plugin instance; additional jobs
+remain queued. Live status includes a matched transfer, active state, and actual
+materialized byte progress so the host can distinguish queued work from a
+missing transfer. The byte count is a monotonic high-water mark of workspace
+file sizes, not a network traffic counter.
+
+Track acquisition retries transport failures and HTTP 408/429/500/502/503/504
+up to three total attempts with exponential backoff and jitter. Each retry
+resolves media again and starts a fresh partial file and decryptor; cancellation
+and non-transient failures are not retried. Exhausted album tracks are logged
+and skipped.
+
 All Deezer API and gateway calls go through one `DeezerClient` per job, which:
 
 - authenticates via `deezer.getUserData` and caches the session
