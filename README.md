@@ -10,7 +10,7 @@ configure the settings below, and enable the plugin.
 After enabling, inspect `/api/v1/plugins/sources` using an authenticated admin
 session. The Deezer source should report `has_client` and `has_indexer` as true,
 `target_source` as `plugin:deezer-download`, `configured` as true, and healthy
-status. An actual search and download is still needed to verify the full flow.
+status.
 
 ## Configuration
 
@@ -41,8 +41,7 @@ Each download uses a workspace at `<downloads_dir>/<backend UUID>/`.
 
 The database records job ownership and completed file paths before and during
 downloads. Completed jobs remain available for inspection and cleanup after a
-restart, using their original workspace even if `downloads_dir` changes. Keep
-that original location accessible until cleanup finishes.
+restart, using their original workspace even if `downloads_dir` changes.
 
 Previously running jobs are marked interrupted rather than resumed. Stop the
 old plugin workers before starting a replacement instance; do not run multiple
@@ -249,6 +248,19 @@ hits the live Deezer API with `DEEZER_ARL` set.
 
 CI (`.forgejo/workflows/ci.yml`) runs the lint and test commands above on
 every push and pull request.
+
+## Roadmap
+
+- Embed album thumbnails in FLAC files
+- MP3 tagging: embed text metadata and album thumbnails
+- Download album covers
+
+## Disclaimer
+
+This plugin is not affiliated with or endorsed by Deezer. Use responsibly and in
+accordance with your local laws regarding music downloading. Please respect
+copyright laws and the terms of service for Deezer. Downloading
+requires your own active Deezer subscription, and quality is limited by your plan.
 
 ## Acknowledgements
 
