@@ -205,6 +205,11 @@ class DirectDeezerMediaService:
             total_bytes = _content_length(cdn_response)
             written = 0
 
+            # NOTE: chunk decryption and disk writes run on the event loop
+            # here. Fine for local storage (sub-millisecond chunks); on a
+            # slow/NFS downloads_dir this can lag the host loop, and the
+            # fix is offloading decrypt+write batches via asyncio.to_thread
+            # (DroppedNeedle house rule).
             with temporary_path.open("wb") as output:
                 async for chunk in _decrypted_chunks(
                     cdn_response,

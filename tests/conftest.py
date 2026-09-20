@@ -143,7 +143,6 @@ _install(
     DownloadTaskStatus=DownloadTaskStatus,
     DownloadMaterialization=DownloadMaterialization,
     MountDiagnosis=MountDiagnosis,
-    ServiceStatus=ServiceStatus,
 )
 
 # Wire attribute access (import infrastructure.plugins.protocols style).

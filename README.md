@@ -140,6 +140,32 @@ An `album:<id>` payload reuses the same track pipeline:
 admin settings: `arl` (the Deezer ARL cookie, stored as a secret) and
 `downloads_dir` (where completed files are staged).
 
+### Installation and runtime dependencies
+
+DNDeezer targets DroppedNeedle Plugin API v1. In DroppedNeedle v2.13.0,
+open **Settings → Plugins**, install `https://github.com/Sarpar12/DNDeezer`,
+configure `arl` and `downloads_dir`, and enable the plugin. The staging directory
+must be writable by DroppedNeedle and on the same filesystem as the library.
+
+The plugin requires `cryptography>=46.0.0` and `httpx>=0.28.1` in the host's
+Python environment. Plugin installation is not documented to install
+`pyproject.toml` dependencies or create a separate virtual environment. Verify
+the dependencies using the Python interpreter that runs DroppedNeedle, inside
+its container if applicable:
+
+```sh
+python -c 'from importlib.metadata import version; from cryptography.hazmat.decrepit.ciphers.algorithms import Blowfish; import httpx; print("cryptography", version("cryptography")); print("httpx", version("httpx"))'
+```
+
+If missing or below the required versions, provision them in the host environment
+or container image before enabling the plugin. DNDeezer uses the host-provided
+`context.http` client.
+
+After enabling, inspect `/api/v1/plugins/sources` using an authenticated admin
+session. The Deezer source should report `has_client` and `has_indexer` as true,
+`target_source` as `plugin:deezer-download`, `configured` as true, and healthy
+status. An actual search and download is still needed to verify the full flow.
+
 ## Development
 
 The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
@@ -162,11 +188,11 @@ every push and pull request.
 ## Known limitations
 
 - No metadata or cover-art embedding; files are written as raw decrypted audio.
-- `plugin.py`, `indexer.py`, and `download_client.py` import host modules
-	(`infrastructure.plugins.protocols`, `models.common`,
-	`repositories.protocols.*`) that are not part of this repository; the test
-	suite stubs them via `tests/conftest.py`, but they can only truly be
-	imported inside the host application.
+- The plugin requires host modules that are not part of this repository; the
+	test suite stubs them via `tests/conftest.py`. Search and download boundary
+	types use the public `infrastructure.plugins.protocols` surface.
+	`ServiceStatus` still comes from `models.common` because DroppedNeedle
+	v2.13.0 does not re-export it through the public plugin API.
 
 ## Acknowledgements
 

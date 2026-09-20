@@ -4,6 +4,8 @@ import asyncio
 from difflib import SequenceMatcher
 
 from infrastructure.plugins.protocols import IndexerResult, PluginSearchResult
+
+# DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
 
 from .deezer.client import DeezerClient

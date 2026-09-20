@@ -7,7 +7,7 @@ entrypoint = "plugin:DNDeezer"    # <module>:<ClassName>
 capabilities = ["download_client", "indexer"]
 description = "Search and download music from Deezer (quality limited to your account max)."
 author = "Sarpar12"
-homepage = "https://acme-music.test"
+homepage = "https://github.com/Sarpar12/DNDeezer"
 
 [[capability]]
 id = "download_client"

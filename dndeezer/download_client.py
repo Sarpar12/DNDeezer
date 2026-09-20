@@ -15,14 +15,16 @@ import asyncio
 import shutil
 from pathlib import Path
 
-from models.common import ServiceStatus
-from repositories.protocols.download_client import (
+from infrastructure.plugins.protocols import (
     DownloadMaterialization,
     DownloadTaskStatus,
     EnqueueRequest,
     MountDiagnosis,
     TaskHandle,
 )
+
+# DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
+from models.common import ServiceStatus
 
 from .backend import BackendJob, parse_payload
 from .backends.direct import DirectDeezerBackend, build_direct_backend
