@@ -1,6 +1,75 @@
 # Plugin
 This plugin provides downloading support from Deezer, quality limited by account max.
 
+## Installation
+
+DNDeezer targets DroppedNeedle Plugin API v1. In DroppedNeedle v2.13.0,
+open **Settings → Plugins**, install `https://github.com/Sarpar12/DNDeezer`,
+configure the settings below, and enable the plugin.
+
+After enabling, inspect `/api/v1/plugins/sources` using an authenticated admin
+session. The Deezer source should report `has_client` and `has_indexer` as true,
+`target_source` as `plugin:deezer-download`, `configured` as true, and healthy
+status. An actual search and download is still needed to verify the full flow.
+
+## Configuration
+
+`plugin.toml` declares one complete source (`download_client` + `indexer`,
+target `plugin:deezer-download`) with three admin settings:
+
+| Setting | Required / default | Purpose |
+| --- | --- | --- |
+| `arl` | Required | Deezer ARL cookie, stored as a secret. Download quality is limited by the account. |
+| `downloads_dir` | Required | Directory for staged downloads. Must be writable by DroppedNeedle and on the same filesystem as the library. |
+| `state_dir` | Optional; `/app/config/dndeezer` | Persistent local directory containing `jobs.sqlite3`. Must be writable and outside the replaceable plugin installation directory. Restart the plugin after changing it. |
+
+### Docker storage
+
+Use **container paths** for these settings. Keep `/app/config` mounted to
+persistent storage so the default job database survives container recreation.
+For example, retain a Compose mount such as:
+
+```yaml
+volumes:
+  - ./config:/app/config
+```
+
+The configured `downloads_dir` must also be backed by persistent storage.
+Each download uses a workspace at `<downloads_dir>/<backend UUID>/`.
+
+### Persistent job state
+
+The database records job ownership and completed file paths before and during
+downloads. Completed jobs remain available for inspection and cleanup after a
+restart, using their original workspace even if `downloads_dir` changes. Keep
+that original location accessible until cleanup finishes.
+
+Previously running jobs are marked interrupted rather than resumed. Stop the
+old plugin workers before starting a replacement instance; do not run multiple
+instances against the same registry. When relocating `state_dir`, retain the
+existing database so its job mappings remain available.
+
+Cleanup retains a cleaned record for repeated host requests. Failed deletion
+retains ownership for retry. See [`db/README.md`](db/README.md) for optional
+database maintenance.
+
+## Known limitations
+
+- **Automatic cleanup requires the host-side fix in
+  [DroppedNeedle PR #478](https://github.com/DroppedNeedle/DroppedNeedle/pull/478)
+  or an equivalent fix.** Hosts with the old cleanup routing can reject plugin
+  jobs with `materialization_fingerprint_missing` before calling plugin cleanup.
+  SQLite persistence alone does not fix this. Existing fingerprint-related
+  `needs_attention` attempts may still require reconciliation or manual cleanup.
+- Old handles lost before persistence was introduced cannot be reconstructed
+  automatically.
+- No metadata or cover-art embedding; files are written as raw decrypted audio.
+- The plugin requires host modules that are not part of this repository; the
+  test suite stubs them via `tests/conftest.py`. Search and download boundary
+  types use the public `infrastructure.plugins.protocols` surface.
+  `ServiceStatus` still comes from `models.common` because DroppedNeedle
+  v2.13.0 does not re-export it through the public plugin API.
+
 ## Architecture
 
 The project has two connected paths: the indexer discovers Deezer content, while
@@ -135,45 +204,7 @@ An `album:<id>` payload reuses the same track pipeline:
 | `download_client.py` | Host `download_client` capability adapter (handles, status mapping) |
 | `deezer/media.py` | Media acquisition (tracks and albums) and progress reporting |
 
-## Configuration
-
-`plugin.toml` declares the plugin as one complete source
-(`download_client` + `indexer`, target `plugin:deezer-download`) with two
-admin settings: `arl` (the Deezer ARL cookie, stored as a secret) and
-`downloads_dir` (where completed files are staged).
-
-### Installation
-
-DNDeezer targets DroppedNeedle Plugin API v1. In DroppedNeedle v2.13.0,
-open **Settings → Plugins**, install `https://github.com/Sarpar12/DNDeezer`,
-configure `arl` and `downloads_dir`, and enable the plugin. The staging directory
-must be writable by DroppedNeedle and on the same filesystem as the library.
-
-After enabling, inspect `/api/v1/plugins/sources` using an authenticated admin
-session. The Deezer source should report `has_client` and `has_indexer` as true,
-`target_source` as `plugin:deezer-download`, `configured` as true, and healthy
-status. An actual search and download is still needed to verify the full flow.
-
 ## Development
-
-### Persistent job state
-
-The download client stores job ownership and completion evidence in
-`/app/config/dndeezer/jobs.sqlite3`. The optional `state_dir` plugin setting
-overrides the directory. Keep it on persistent local storage outside the plugin
-installation, and restart the plugin after changing it. In Docker, retain the
-existing `/app/config` volume mount.
-
-Completed jobs can be inspected and cleaned after restart, even if
-`downloads_dir` changes. Previously running jobs are marked interrupted rather
-than resumed. Stop the old plugin workers before starting a replacement instance;
-do not run multiple instances against the same registry.
-
-Cleanup retains a cleaned record for repeated host requests. Failed deletion
-retains ownership for retry. See `db/README.md` for optional database maintenance.
-Old handles lost before persistence was introduced cannot be reconstructed.
-This integration does not bypass DroppedNeedle's pre-PR-478 fingerprint checks;
-those can still prevent the host from calling plugin cleanup.
 
 The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
 
@@ -191,15 +222,6 @@ hits the live Deezer API with `DEEZER_ARL` set.
 
 CI (`.forgejo/workflows/ci.yml`) runs the lint and test commands above on
 every push and pull request.
-
-## Known limitations
-
-- No metadata or cover-art embedding; files are written as raw decrypted audio.
-- The plugin requires host modules that are not part of this repository; the
-	test suite stubs them via `tests/conftest.py`. Search and download boundary
-	types use the public `infrastructure.plugins.protocols` surface.
-	`ServiceStatus` still comes from `models.common` because DroppedNeedle
-	v2.13.0 does not re-export it through the public plugin API.
 
 ## Acknowledgements
 
