@@ -52,6 +52,7 @@ def test_capabilities_known_and_capability_tables_consistent(manifest):
     capabilities = manifest["plugin"]["capabilities"]
     assert capabilities
     assert set(capabilities) <= V1_CAPABILITIES
+    assert set(capabilities) == {"download_client", "indexer"}
 
     for table in manifest.get("capability", []):
         assert table["id"] in capabilities
@@ -81,6 +82,13 @@ def test_settings_shape_and_arl_declared(manifest):
     arl = next((s for s in settings if s["key"] == "arl"), None)
     assert arl is not None, "the indexer reads settings.get('arl')"
     assert arl.get("secret") is True
+
+    downloads_dir = next(
+        (s for s in settings if s["key"] == "downloads_dir"), None
+    )
+    assert downloads_dir is not None, (
+        "the download client stages files via settings.get('downloads_dir')"
+    )
 
 
 def test_plugin_py_bootstraps_sys_path_before_package_import():

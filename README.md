@@ -130,12 +130,15 @@ An `album:<id>` payload reuses the same track pipeline:
 | `deezer/models.py` | Typed Deezer domain objects |
 | `backend.py` | Download contracts, job values, and payload parsing |
 | `backends/direct.py` | Async job lifecycle, filesystem readiness, and `build_direct_backend()` wiring |
+| `downloadClient.py` | Host `download_client` capability adapter (handles, status mapping) |
 | `deezer/media.py` | Media acquisition (tracks and albums) and progress reporting |
 
 ## Configuration
 
-`plugin.toml` declares a single admin setting, `arl` (the Deezer ARL cookie,
-stored as a secret), which both the indexer and the download backend read.
+`plugin.toml` declares the plugin as one complete source
+(`download_client` + `indexer`, target `plugin:deezer-download`) with two
+admin settings: `arl` (the Deezer ARL cookie, stored as a secret) and
+`downloads_dir` (where completed files are staged).
 
 ## Development
 
@@ -144,7 +147,7 @@ The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
 ```sh
 uv sync --frozen        # install locked dependencies, including dev group
 uv run ruff check .     # lint
-uv run pytest tests/ -q # test suite (93 tests)
+uv run pytest tests/ -q # test suite (118 tests)
 ```
 
 The pipeline tests fake only the HTTP transport, so the client, media service,
@@ -159,9 +162,11 @@ every push and pull request.
 ## Known limitations
 
 - No metadata or cover-art embedding; files are written as raw decrypted audio.
-- `plugin.py` and `indexer.py` import host modules
-	(`infrastructure.plugins.protocols`, `models.common`) that are not part of
-	this repository, so they can only be imported inside the host application.
+- `plugin.py`, `indexer.py`, and `downloadClient.py` import host modules
+	(`infrastructure.plugins.protocols`, `models.common`,
+	`repositories.protocols.*`) that are not part of this repository; the test
+	suite stubs them via `tests/conftest.py`, but they can only truly be
+	imported inside the host application.
 
 ## Acknowledgements
 

@@ -4,17 +4,27 @@ display_name = "Deezer Download"
 version = "0.0.1"
 api_version = 1
 entrypoint = "plugin:DNDeezer"    # <module>:<ClassName>
-capabilities = ["indexer"]
-description = "Search Deezer for albums and tracks (downloads limited to your account max)."
+capabilities = ["download_client", "indexer"]
+description = "Search and download music from Deezer (quality limited to your account max)."
 author = "Sarpar12"
 homepage = "https://acme-music.test"
 
 [[capability]]
+id = "download_client"
+source = "deezer-download"        # display alias
+display_name = "Deezer"
+
+[[capability]]
 id = "indexer"
-target_source = "plugin:deezer-download"   # indexer-only plugins must pin their target
+target_source = "plugin:deezer-download"
 
 [[settings]]                   # admin-editable fields
 key = "arl"
 label = "Deezer ARL"
 help = "Deezer request cookie used for authenticated API calls."
 secret = true                  # encrypted at rest, masked, sentinel saves
+
+[[settings]]
+key = "downloads_dir"
+label = "Downloads directory"
+help = "Folder completed Deezer files are staged in; must be on the same filesystem as the library."
