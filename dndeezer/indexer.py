@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import unicodedata
 from difflib import SequenceMatcher
 
@@ -96,7 +97,7 @@ class DeezerIndexer:
                 )
                 continue
             title = f"{album.artist.name} - {album.title}"
-            identity_score = self._album_score(artist_name, album_title, album)
+            identity_score = self._album_score(artist_name, album_title, album, year)
             # Keep alternate editions eligible, but prefer complete editions
             # matching the requested track count over short/expanded releases.
             count_match = 0.5
@@ -208,10 +209,11 @@ class DeezerIndexer:
         results: list[IndexerResult] = []
 
         for track in tracks:
-            results.append(self._track_result(
-                track, self._track_score(artist_name, track_title, track),
-            ))
+            results.append(self._track_result(track, self._track_score(
+                artist_name, track_title, track, album_title, duration_seconds,
+            )))
 
+        results.sort(key=lambda result: result.plugin.score, reverse=True)
         return results
 
     def _album_score(
@@ -219,30 +221,45 @@ class DeezerIndexer:
         artist_name: str,
         album_title: str,
         album: DeezerAlbum,
+        year: int | None = None,
     ) -> float:
-        candidate = f"{album.artist.name} - {album.title}"
-        # Prefer DroppedNeedle own scorer if possible
-
-        scoring = getattr(self.ctx, "scoring", None)
-
-        if scoring is not None:
-            return scoring.album_match(artist_name, album_title, candidate)
-        # Fallback
-        return (_similarity(artist_name, album.artist.name) * 0.5 + _similarity(album_title, album.title) * 0.5)
+        # Structured comparison: DroppedNeedle's ctx.scoring helpers parse
+        # scene/Soulseek filenames; Deezer returns clean separated fields,
+        # so compare them directly and use signals the filename scorer
+        # cannot see (release year).
+        score = (
+            _title_score(album_title, album.title) * 0.62
+            + _title_score(artist_name, album.artist.name) * 0.38
+        )
+        if year and (release_year := _release_year(album.release_date)):
+            score *= 1.0 if release_year == year else 0.96
+        return score
 
     def _track_score(
         self,
         artist_name: str,
         track_title: str,
         track: DeezerTrack,
+        album_title: str | None = None,
+        duration_seconds: int | None = None,
     ) -> float:
-        candidate = f"{track.artist.name} - {track.title}"
-        scoring = getattr(self.ctx, "scoring", None)
-
-        if scoring is not None:
-            return scoring.track_match(artist_name, track_title, candidate)
-
-        return (_similarity(artist_name, track.artist.name) * 0.5 + _similarity(track_title, track.title) * 0.5) 
+        if duration_seconds and track.duration_seconds:
+            score = (
+                _title_score(track_title, track.title) * 0.55
+                + _title_score(artist_name, track.artist.name) * 0.20
+                + _duration_score(duration_seconds, track.duration_seconds) * 0.25
+            )
+        else:
+            score = (
+                _title_score(track_title, track.title) * 0.65
+                + _title_score(artist_name, track.artist.name) * 0.35
+            )
+        if album_title and track.album_title:
+            # Gentle multiplicative tie-break: additive boosts saturate at 1.0.
+            score *= 0.97 + 0.03 * _title_score(album_title, track.album_title)
+        if _version_markers(track_title) != _version_markers(track.title):
+            score *= 0.3  # "(Acoustic)"/"(Remix)" mismatches are different recordings
+        return min(score, 1.0)
 
 def _similarity(left: str, right: str) -> float:
     left = left.strip().casefold()
@@ -255,6 +272,67 @@ def _similarity(left: str, right: str) -> float:
 
 
 def _identity_text(value: str) -> str:
-    """Ignore punctuation, case and accents when comparing artist identities."""
+    """Ignore punctuation, case and accents when comparing identities."""
     normalized = unicodedata.normalize("NFKD", value.casefold())
     return "".join(char for char in normalized if char.isalnum())
+
+
+def _words(value: str) -> frozenset[str]:
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return frozenset(
+        word for word in re.split(r"[^\w]+", normalized) if word and word != "_"
+    )
+
+
+def _title_score(target: str, candidate: str) -> float:
+    """Compare two titles (or artists) from structured metadata.
+
+    Unlike the host's filename scorer, both sides are known-clean fields, so
+    equality of identity or word set is decisive and only residual noise
+    needs fuzzy matching. Parenthesised aliases and transliterations
+    ("춤 (CHOOM)" vs "CHOOM") match directly, which token metrics handle
+    poorly for CJK text.
+    """
+    target_id = _identity_text(target)
+    candidate_id = _identity_text(candidate)
+    if not target_id or not candidate_id:
+        return 0.0
+    if target_id == candidate_id:
+        return 1.0
+    target_words = _words(target)
+    if target_words and target_words == _words(candidate):
+        return 0.98
+    for alias in re.findall(r"\(([^()]*)\)", candidate):
+        if _identity_text(alias) == target_id:
+            return 0.95
+    for alias in re.findall(r"\(([^()]*)\)", target):
+        if _identity_text(alias) == candidate_id:
+            return 0.95
+    return SequenceMatcher(None, target_id, candidate_id).ratio()
+
+
+def _version_markers(value: str) -> frozenset[str]:
+    return frozenset(
+        re.findall(
+            r"\b(remix|live|acoustic|instrumental|demo|karaoke|cover|"
+            r"radio edit|extended|remaster|remastered)\b",
+            value.casefold(),
+        )
+    )
+
+
+def _duration_score(target_seconds: int, candidate_seconds: int) -> float:
+    difference = abs(int(target_seconds) - int(candidate_seconds))
+    if difference <= 3:
+        return 1.0
+    if difference <= 10:
+        return 0.7
+    if difference <= 20:
+        return 0.3
+    return 0.0
+
+
+def _release_year(release_date: str | None) -> int | None:
+    if match := re.search(r"\b(1[89]\d{2}|20\d{2}|21\d{2})\b", release_date or ""):
+        return int(match.group(1))
+    return None
