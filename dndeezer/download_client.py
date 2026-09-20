@@ -417,19 +417,38 @@ class DeezerDownloadClient:
         remote_filename: str,
         size: int | None = None,
     ) -> Path | None:
+        self.ctx.logger.info(
+            "DNDeezer get_file_path: job=%s requested=%s size=%s",
+            handle.job_name, remote_filename, size,
+        )
         job = self._resolve(handle)
         if job is None:
-            for file in await self.list_completed_files(handle):
+            files = await self.list_completed_files(handle)
+            for file in files:
                 if file.name == Path(remote_filename).name:
                     record = await self._record(handle)
                     if await run_blocking(lambda file=file, record=record: file.resolve().is_relative_to(record.workspace_path)):
+                        self.ctx.logger.info("DNDeezer file resolved from registry: path=%s", file)
                         return file
+            self.ctx.logger.warning(
+                "DNDeezer file lookup missed: job=%s requested=%s registered_files=%s",
+                handle.job_name, remote_filename, [str(file) for file in files],
+            )
             return None
 
-        return await self._get_backend().get_file_path(
+        path = await self._get_backend().get_file_path(
             job,
             remote_filename,
         )
+        if path is None:
+            files = await self._get_backend().list_completed_files(job)
+            self.ctx.logger.warning(
+                "DNDeezer file lookup missed: job=%s requested=%s completed_files=%s",
+                handle.job_name, remote_filename, [str(file) for file in files],
+            )
+        else:
+            self.ctx.logger.info("DNDeezer file resolved: path=%s", path)
+        return path
 
     async def diagnose_downloads_mount(self) -> MountDiagnosis:
         return MountDiagnosis(supported=False)
