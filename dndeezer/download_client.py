@@ -152,6 +152,10 @@ class DeezerDownloadClient:
                 mount_root=backend.downloads_dir,
                 workspace_path=backend.downloads_dir / job.backend_id,
             )
+            self.ctx.logger.info(
+                "DNDeezer enqueue: task_id=%s job=%s payload=%s workspace=%s",
+                job.task_id, job_name, payload, backend.downloads_dir / job.backend_id,
+            )
 
         async def on_finished(status, files):
             await run_blocking(self._store.update, job_name, state=status.state,

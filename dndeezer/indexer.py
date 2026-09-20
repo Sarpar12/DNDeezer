@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import unicodedata
 from difflib import SequenceMatcher
 
 from infrastructure.plugins.protocols import IndexerResult, PluginSearchResult
@@ -71,21 +72,48 @@ class DeezerIndexer:
         results: list[IndexerResult] = []
 
         for album in albums:
+            artist_match = _similarity(
+                _identity_text(artist_name), _identity_text(album.artist.name),
+            )
+            reason = None
+            if artist_name.strip() and artist_match < 0.8:
+                reason = "artist_mismatch"
+            elif track_count and track_count > 1 and album.track_count is not None and album.track_count <= 1:
+                reason = "single_track_release"
+            if reason:
+                self.ctx.logger.info(
+                    "DNDeezer album rejected: album_id=%s artist=%s title=%s "
+                    "tracks=%s expected_tracks=%s reason=%s",
+                    album.id, album.artist.name, album.title,
+                    album.track_count, track_count, reason,
+                )
+                continue
             title = f"{album.artist.name} - {album.title}"
+            identity_score = self._album_score(artist_name, album_title, album)
+            # Keep alternate editions eligible, but prefer complete editions
+            # matching the requested track count over short/expanded releases.
+            count_match = 0.5
+            if track_count and album.track_count and album.track_count > 0:
+                count_match = min(track_count, album.track_count) / max(track_count, album.track_count)
+            score = identity_score
+            if track_count and track_count > 1:
+                score = identity_score * (0.8 + 0.2 * count_match)
+            self.ctx.logger.info(
+                "DNDeezer album candidate: payload=album:%s artist=%s title=%s "
+                "tracks=%s expected_tracks=%s score=%.3f",
+                album.id, album.artist.name, album.title, album.track_count, track_count, score,
+            )
             results.append(IndexerResult(
                 source=SOURCE,
                 plugin=PluginSearchResult(
                     title=title,
-                    score=self._album_score(
-                        artist_name,
-                        album_title,
-                        album
-                    ),
+                    score=score,
                     files = [],
                     payload=f"album:{album.id}",
                 ),
             ))
 
+        results.sort(key=lambda result: result.plugin.score, reverse=True)
         return results
 
     async def search_track(
@@ -166,3 +194,9 @@ def _similarity(left: str, right: str) -> float:
         return 1.0
 
     return SequenceMatcher(None, left, right).ratio()
+
+
+def _identity_text(value: str) -> str:
+    """Ignore punctuation, case and accents when comparing artist identities."""
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in normalized if char.isalnum())

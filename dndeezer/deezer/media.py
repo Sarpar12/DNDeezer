@@ -89,6 +89,12 @@ class DirectDeezerMediaService:
         # Do not return temporary/partial files.
         session = await self.client.authenticate()
         album, tracks = await self.client.get_album_with_tracklist(album_id)
+        logger.info(
+            "Deezer album resolved: album_id=%s artist=%s title=%s "
+            "reported_tracks=%s resolved_tracks=%s workspace=%s",
+            album_id, album.artist.name, album.title, album.track_count,
+            len(tracks), destination,
+        )
 
         if not tracks:
             raise MediaAcquisitionError(
