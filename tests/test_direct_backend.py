@@ -256,7 +256,8 @@ async def test_filesystem_operations_stay_off_event_loop(tmp_path, monkeypatch):
             patch.setattr(Path, name, guard(name, getattr(Path, name)))
 
         adapter = DeezerDownloadClient(SimpleNamespace(
-            settings={"arl": "test", "downloads_dir": str(tmp_path / "downloads")},
+            settings={"arl": "test", "downloads_dir": str(tmp_path / "downloads"),
+                      "state_dir": str(tmp_path / "state")},
             http=object(), logger=logging.getLogger("test.filesystem"),
         ))
         backend = adapter._get_backend()

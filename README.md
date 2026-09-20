@@ -156,6 +156,25 @@ status. An actual search and download is still needed to verify the full flow.
 
 ## Development
 
+### Persistent job state
+
+The download client stores job ownership and completion evidence in
+`/app/config/dndeezer/jobs.sqlite3`. The optional `state_dir` plugin setting
+overrides the directory. Keep it on persistent local storage outside the plugin
+installation, and restart the plugin after changing it. In Docker, retain the
+existing `/app/config` volume mount.
+
+Completed jobs can be inspected and cleaned after restart, even if
+`downloads_dir` changes. Previously running jobs are marked interrupted rather
+than resumed. Stop the old plugin workers before starting a replacement instance;
+do not run multiple instances against the same registry.
+
+Cleanup retains a cleaned record for repeated host requests. Failed deletion
+retains ownership for retry. See `db/README.md` for optional database maintenance.
+Old handles lost before persistence was introduced cannot be reconstructed.
+This integration does not bypass DroppedNeedle's pre-PR-478 fingerprint checks;
+those can still prevent the host from calling plugin cleanup.
+
 The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
 
 ```sh

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -36,6 +37,7 @@ class _InternalJob:
     )
 
     task: asyncio.Task[None] | None = None
+    on_finished: Callable[[BackendStatus, list[Path]], Awaitable[None]] | None = None
 
 
 class DirectDeezerBackend:
@@ -125,6 +127,8 @@ class DirectDeezerBackend:
         *,
         task_id: str,
         target: DownloadTarget,
+        before_start: Callable[[BackendJob], Awaitable[None]] | None = None,
+        on_finished: Callable[[BackendStatus, list[Path]], Awaitable[None]] | None = None,
     ) -> BackendJob:
         if not task_id:
             raise ValueError(
@@ -142,7 +146,11 @@ class DirectDeezerBackend:
 
         internal = _InternalJob(
             job=job,
+            on_finished=on_finished,
         )
+
+        if before_start is not None:
+            await before_start(job)
 
         self._jobs[backend_id] = internal
 
@@ -158,6 +166,10 @@ class DirectDeezerBackend:
         job: BackendJob,
     ) -> BackendStatus:
         internal = self._get_job(job)
+
+        if (internal.state in ("completed", "failed", "cancelled") and internal.task
+                and not internal.task.cancelled()):
+            await asyncio.shield(internal.task)
 
         return BackendStatus(
             state=internal.state,
@@ -195,6 +207,13 @@ class DirectDeezerBackend:
             await task
         except asyncio.CancelledError:
             pass
+
+        # A task cancelled before its first step never enters _run_job's finally.
+        if internal.state in ("queued", "downloading"):
+            internal.state = "cancelled"
+            await self._cleanup_job_directory(internal)
+            if internal.on_finished is not None:
+                await internal.on_finished(BackendStatus(state="cancelled"), [])
 
         return True
 
@@ -336,6 +355,13 @@ class DirectDeezerBackend:
             await self._cleanup_job_directory(
                 internal
             )
+
+        finally:
+            if internal.on_finished is not None:
+                await internal.on_finished(
+                    BackendStatus(state=internal.state, error=internal.error),
+                    list(internal.files),
+                )
 
     def _update_progress(
         self,

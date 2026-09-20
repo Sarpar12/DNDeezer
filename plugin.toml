@@ -28,3 +28,8 @@ secret = true                  # encrypted at rest, masked, sentinel saves
 key = "downloads_dir"
 label = "Downloads directory"
 help = "Folder completed Deezer files are staged in; must be on the same filesystem as the library."
+
+[[settings]]
+key = "state_dir"
+label = "Persistent state directory"
+help = "Job database directory; defaults to /app/config/dndeezer. Use persistent local storage outside the plugin installation. Restart the plugin after changing this."
