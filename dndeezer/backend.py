@@ -31,6 +31,7 @@ class BackendStatus:
 
     progress_percent: float = 0.0
     error: str | None = None
+    bytes_downloaded: int = 0
 
 
 @dataclass(frozen=True, slots=True)

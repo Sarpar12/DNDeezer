@@ -611,7 +611,7 @@ async def test_acquire_track_decrypts_stream_to_output(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_stream", [False, True])
+@pytest.mark.parametrize("fail_stream", [False, True, "recover"])
 async def test_acquire_track_real_httpx_stream(tmp_path, fail_stream):
     plaintext = bytes(range(256)) * 600 + b"tail"
     encrypted = _encrypt_plaintext(plaintext, 100)
@@ -619,12 +619,14 @@ async def test_acquire_track_real_httpx_stream(tmp_path, fail_stream):
 
     class MediaStream(httpx.AsyncByteStream):
         closed = False
+        attempts = 0
 
         async def __aiter__(self):
+            self.attempts += 1
             yield encrypted[:65536]
             # Processing starts before the whole response has been received.
             assert progress
-            if fail_stream:
+            if fail_stream is True or (fail_stream == "recover" and self.attempts == 1):
                 raise httpx.ReadError("connection lost")
             for offset in range(65536, len(encrypted), 997):
                 yield encrypted[offset:offset + 997]
@@ -653,16 +655,18 @@ async def test_acquire_track_real_httpx_stream(tmp_path, fail_stream):
         session = DeezerSession(
             user_id=1, country="US", api_token="csrf", license_token="lic",
         )
-        if fail_stream:
+        if fail_stream is True:
             with pytest.raises(MediaAcquisitionError, match="connection lost"):
                 await service._acquire_track(
                     100, tmp_path, session=session, on_progress=progress.append,
                 )
             assert not list(tmp_path.iterdir())
+            assert stream.attempts == 3
         else:
             files = await service._acquire_track(
                 100, tmp_path, session=session, on_progress=progress.append,
             )
+            assert stream.attempts == (2 if fail_stream == "recover" else 1)
             assert files[0].read_bytes() == plaintext
             assert progress == sorted(progress)
             assert progress[-1] == 100

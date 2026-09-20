@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
+import httpx
 from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
@@ -150,6 +152,42 @@ class DirectDeezerMediaService:
         return album_dir
 
     async def _acquire_track(
+        self, track_id: int, destination: Path, *,
+        on_progress: ProgressCallback | None = None,
+        session: DeezerSession | None = None, stem: str | None = None,
+        album: DeezerAlbum | None = None, position: int | None = None,
+    ) -> list[Path]:
+        # Restart the whole track, including token/URL resolution and decryption.
+        # _acquire_track_once removes the partial file before this retry starts.
+        for attempt in range(3):
+            try:
+                return await self._acquire_track_once(
+                    track_id, destination, on_progress=on_progress, session=session,
+                    stem=stem, album=album, position=position,
+                )
+            except Exception as exc:
+                cause = exc
+                retryable = False
+                while cause is not None:
+                    if isinstance(cause, httpx.TransportError) or (
+                        isinstance(cause, httpx.HTTPStatusError)
+                        and cause.response.status_code in (408, 429, 500, 502, 503, 504)
+                    ):
+                        retryable = True
+                        break
+                    cause = cause.__cause__
+                if not retryable or attempt == 2:
+                    raise
+                delay = 2 ** attempt + random.uniform(0, 0.5)
+                logger.warning(
+                    "Deezer track retry: track_id=%s workspace=%s attempt=%s/3 "
+                    "error_type=%s delay=%.2fs",
+                    track_id, destination, attempt + 1, type(cause).__name__, delay,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable")
+
+    async def _acquire_track_once(
         self,
         track_id: int,
         destination: Path,

@@ -226,8 +226,11 @@ class DeezerDownloadClient:
 
         return DownloadTaskStatus(
             task_id=task_id,
-            status="downloading",
+            status="queued" if status.state == "queued" else "downloading",
             progress_percent=status.progress_percent,
+            matched_transfers=1,
+            has_active_transfer=status.state == "downloading",
+            bytes_downloaded=status.bytes_downloaded,
         )
 
     async def abort(self, handle: TaskHandle) -> bool:

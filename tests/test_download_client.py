@@ -88,6 +88,50 @@ async def wait_for_status(adapter, handle, wanted, timeout=2.0):
 # -- identity and configuration --
 
 @pytest.mark.asyncio
+async def test_live_status_reports_transfer_bytes_and_limits_concurrency(tmp_path):
+    release = asyncio.Event()
+
+    class StreamingMedia:
+        async def acquire(self, target, destination, *, on_progress=None):
+            partial = destination / ".track.part"
+            partial.write_bytes(b"x" * 8192)
+            on_progress(10)
+            await release.wait()
+            result = destination / "track.flac"
+            partial.rename(result)
+            return [result]
+
+    adapter, _ = make_client(tmp_path, StreamingMedia())
+    handles = []
+    try:
+        for i in range(3):
+            handles.append(await adapter.enqueue(
+                EnqueueRequest(task_id=f"stream-{i}", source=SOURCE, payload="track:1")
+            ))
+        for _ in range(100):
+            active = await adapter.get_status(handles[0])
+            if active.bytes_downloaded:
+                break
+            await asyncio.sleep(0.01)
+        assert active.matched_transfers == 1
+        assert active.has_active_transfer
+        assert active.bytes_downloaded == 8192
+        queued = await adapter.get_status(handles[2])
+        assert queued.status == "queued"
+        assert queued.matched_transfers == 1
+        assert not queued.has_active_transfer
+        assert queued.bytes_downloaded == 0
+        # Cancelling a waiting job must not consume a slot or start its worker.
+        assert await adapter.abort(handles[2])
+        release.set()
+        for handle in handles[:2]:
+            await wait_for_status(adapter, handle, ("completed",))
+    finally:
+        release.set()
+        for handle in handles:
+            await adapter.abort(handle)
+
+@pytest.mark.asyncio
 async def test_completed_job_recovers_after_restart_and_setting_change(tmp_path):
     adapter, _ = make_client(tmp_path, SuccessfulMedia())
     handle = await adapter.enqueue(

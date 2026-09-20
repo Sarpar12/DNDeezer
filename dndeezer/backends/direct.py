@@ -31,6 +31,7 @@ class _InternalJob:
     state: BackendState = "queued"
     progress_percent: float = 0.0
     error: str | None = None
+    bytes_downloaded: int = 0
 
     files: list[Path] = field(
         default_factory=list
@@ -62,6 +63,7 @@ class DirectDeezerBackend:
         )
 
         self._jobs: dict[str, _InternalJob] = {}
+        self._download_slots = asyncio.Semaphore(2)
 
     def is_configured(self) -> bool:
         return bool(
@@ -155,7 +157,7 @@ class DirectDeezerBackend:
         self._jobs[backend_id] = internal
 
         internal.task = asyncio.create_task(
-            self._run_job(internal),
+            self._run_queued_job(internal),
             name=f"dndeezer:{backend_id}",
         )
 
@@ -171,10 +173,27 @@ class DirectDeezerBackend:
                 and not internal.task.cancelled()):
             await asyncio.shield(internal.task)
 
+        if internal.state in ("downloading", "completed"):
+            def materialized_bytes() -> int:
+                total = 0
+                directory = self.downloads_dir / job.backend_id
+                for path in directory.rglob("*"):
+                    try:
+                        if path.is_file() and not path.is_symlink():
+                            total += path.stat().st_size
+                    except FileNotFoundError:
+                        # A .part file may have just been renamed or retried.
+                        continue
+                return total
+            internal.bytes_downloaded = max(
+                internal.bytes_downloaded, await run_blocking(materialized_bytes),
+            )
+
         return BackendStatus(
             state=internal.state,
             progress_percent=internal.progress_percent,
             error=internal.error,
+            bytes_downloaded=internal.bytes_downloaded,
         )
 
     async def abort(
@@ -257,6 +276,10 @@ class DirectDeezerBackend:
             return file
 
         return None
+
+    async def _run_queued_job(self, internal: _InternalJob) -> None:
+        async with self._download_slots:
+            await self._run_job(internal)
 
     async def _run_job(
         self,
