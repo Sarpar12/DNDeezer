@@ -130,7 +130,7 @@ An `album:<id>` payload reuses the same track pipeline:
 | `deezer/models.py` | Typed Deezer domain objects |
 | `backend.py` | Download contracts, job values, and payload parsing |
 | `backends/direct.py` | Async job lifecycle, filesystem readiness, and `build_direct_backend()` wiring |
-| `downloadClient.py` | Host `download_client` capability adapter (handles, status mapping) |
+| `download_client.py` | Host `download_client` capability adapter (handles, status mapping) |
 | `deezer/media.py` | Media acquisition (tracks and albums) and progress reporting |
 
 ## Configuration
@@ -162,7 +162,7 @@ every push and pull request.
 ## Known limitations
 
 - No metadata or cover-art embedding; files are written as raw decrypted audio.
-- `plugin.py`, `indexer.py`, and `downloadClient.py` import host modules
+- `plugin.py`, `indexer.py`, and `download_client.py` import host modules
 	(`infrastructure.plugins.protocols`, `models.common`,
 	`repositories.protocols.*`) that are not part of this repository; the test
 	suite stubs them via `tests/conftest.py`, but they can only truly be
@@ -172,3 +172,5 @@ every push and pull request.
 
 [Octo-Fiesta](https://github.com/V1ck3s/octo-fiesta) - Deezer Download
 Implementation reference
+
+[Dropped-Needle](https://github.com/DroppedNeedle/DroppedNeedle) - Basic download client base

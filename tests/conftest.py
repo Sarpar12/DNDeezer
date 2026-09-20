@@ -1,6 +1,6 @@
 """sys.modules stubs for the DroppedNeedle host packages.
 
-``dndeezer.indexer`` and ``dndeezer.downloadClient`` import boundary types
+``dndeezer.indexer`` and ``dndeezer.download_client`` import boundary types
 from the host application at runtime (see PLUGINS.md). These dataclasses
 mirror those shapes so the plugin code is importable - and testable -
 outside the host. Installed before any test module imports them.

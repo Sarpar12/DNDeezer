@@ -13,7 +13,7 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 # Deferred imports: only valid after the sys.path bootstrap above.
-from dndeezer.downloadClient import DeezerDownloadClient
+from dndeezer.download_client import DeezerDownloadClient
 from dndeezer.indexer import DeezerIndexer
 
 
