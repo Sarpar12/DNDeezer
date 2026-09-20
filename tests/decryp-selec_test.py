@@ -5,6 +5,11 @@ track id, XOR-folded with the shared secret), matching Octo-Fiesta's
 DeezerDecryptedStream.GetBlowfishKey.
 """
 
+import asyncio
+import threading
+from contextlib import asynccontextmanager
+
+import httpx
 import pytest
 from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
@@ -400,6 +405,11 @@ class FakeHttp:
         self.get_calls.append((url, kwargs))
         return self._get_queue.pop(0)
 
+    @asynccontextmanager
+    async def stream(self, method, url, **kwargs):
+        assert method == "GET"
+        yield await self.get(url, **kwargs)
+
     async def post(self, url, **kwargs):
         self.post_calls.append((url, kwargs))
         return self._post_queue.pop(0)
@@ -573,6 +583,108 @@ async def test_acquire_track_decrypts_stream_to_output(tmp_path):
     assert [f.name for f in files] == ["Daft Punk - Harder.flac"]
     assert files[0].read_bytes() == plaintext
     assert not list(tmp_path.glob(".*.part"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_stream", [False, True])
+async def test_acquire_track_real_httpx_stream(tmp_path, fail_stream):
+    plaintext = bytes(range(256)) * 600 + b"tail"
+    encrypted = _encrypt_plaintext(plaintext, 100)
+    progress = []
+
+    class MediaStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield encrypted[:65536]
+            # Processing starts before the whole response has been received.
+            assert progress
+            if fail_stream:
+                raise httpx.ReadError("connection lost")
+            for offset in range(65536, len(encrypted), 997):
+                yield encrypted[offset:offset + 997]
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = MediaStream()
+
+    def handler(request):
+        if request.url.host == "cdn.test":
+            return httpx.Response(
+                200, stream=stream,
+                headers={"content-length": str(len(encrypted))},
+            )
+        if request.url.host == "api.deezer.com":
+            data = _track_response()
+        elif request.url.host == "media.deezer.com":
+            data = _media_api_response().json()
+        else:
+            data = _page_track_response().json()
+        return httpx.Response(200, json=data)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        service = DirectDeezerMediaService(DeezerClient(http, "test-arl", min_interval=0))
+        session = DeezerSession(
+            user_id=1, country="US", api_token="csrf", license_token="lic",
+        )
+        if fail_stream:
+            with pytest.raises(MediaAcquisitionError, match="connection lost"):
+                await service._acquire_track(
+                    100, tmp_path, session=session, on_progress=progress.append,
+                )
+            assert not list(tmp_path.iterdir())
+        else:
+            files = await service._acquire_track(
+                100, tmp_path, session=session, on_progress=progress.append,
+            )
+            assert files[0].read_bytes() == plaintext
+            assert progress == sorted(progress)
+            assert progress[-1] == 100
+        assert stream.closed
+        assert not list(tmp_path.glob(".*.part"))
+
+
+@pytest.mark.asyncio
+async def test_cancel_waits_for_worker_before_cleanup(tmp_path, monkeypatch):
+    from dndeezer.deezer.media import _StripeDecoder
+
+    service, http = _make_service()
+    http.queue_post(_user_data_response())
+    http.queue_get(FakeResponse(_track_response()))
+    http.queue_post(_page_track_response())
+    http.queue_post(_media_api_response())
+    http.queue_get(FakeResponse(pieces=[b"x" * 65536]))
+
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    original = _StripeDecoder.update
+    loop_thread = threading.get_ident()
+
+    def slow_update(self, piece):
+        assert threading.get_ident() != loop_thread
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "test did not release worker"
+        return original(self, piece)
+
+    monkeypatch.setattr(_StripeDecoder, "update", slow_update)
+    task = asyncio.create_task(service._acquire_track(100, tmp_path))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # The event loop remains responsive while a decrypt/write batch stalls.
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert (tmp_path / ".100.part").exists()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert not list(tmp_path.iterdir())
 
 
 # --- DirectDeezerMediaService._find_alternative -------------------------------

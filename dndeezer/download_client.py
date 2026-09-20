@@ -11,7 +11,6 @@ imports whole releases through ``list_completed_files``.
 
 from __future__ import annotations
 
-import asyncio
 import shutil
 from pathlib import Path
 
@@ -26,6 +25,7 @@ from infrastructure.plugins.protocols import (
 # DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
 
+from ._async import run_blocking
 from .backend import BackendJob, parse_payload
 from .backends.direct import DirectDeezerBackend, build_direct_backend
 from .indexer import SOURCE
@@ -55,7 +55,7 @@ class DeezerDownloadClient:
 
     def _downloads_dir(self) -> Path | None:
         raw = str(self.ctx.settings.get("downloads_dir") or "").strip()
-        return Path(raw).expanduser() if raw else None
+        return Path(raw) if raw else None
 
     def _get_backend(self) -> DirectDeezerBackend:
         if self._backend is None:
@@ -220,10 +220,12 @@ class DeezerDownloadClient:
             return False
 
         backend = self._get_backend()
-        directory = (backend.downloads_dir / job.backend_id).resolve()
+        def discard() -> None:
+            directory = (backend.downloads_dir / job.backend_id).resolve()
+            if directory.is_relative_to(backend.downloads_dir):
+                shutil.rmtree(directory, ignore_errors=True)
 
-        if directory.is_relative_to(backend.downloads_dir):
-            await asyncio.to_thread(shutil.rmtree, directory, True)
+        await run_blocking(discard)
 
         for key, entry in list(self._handles.items()):
             if entry == job:
@@ -292,4 +294,4 @@ class DeezerDownloadClient:
                 if file.is_file()
             )
 
-        return await asyncio.to_thread(_sum)
+        return await run_blocking(_sum)

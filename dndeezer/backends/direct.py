@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from dndeezer._async import run_blocking
 from dndeezer.backend import (
     BackendHealth,
     BackendJob,
@@ -49,9 +50,10 @@ class DirectDeezerBackend:
         self.client = client
         self.media = media
 
-        self.downloads_dir = (
-            downloads_dir.expanduser().resolve()
-        )
+        # Resolve lazily from an async entry point, never on the host thread.
+        self.downloads_dir = Path(downloads_dir)
+        self._directory_ready = False
+        self._directory_lock = asyncio.Lock()
 
         self.logger = logger or logging.getLogger(
             __name__
@@ -63,6 +65,14 @@ class DirectDeezerBackend:
         return bool(
             self.downloads_dir
         )
+
+    async def _prepare_downloads_dir(self) -> None:
+        async with self._directory_lock:
+            if not self._directory_ready:
+                self.downloads_dir = await run_blocking(
+                    lambda: self.downloads_dir.expanduser().resolve()
+                )
+                self._directory_ready = True
 
     async def health_check(
         self,
@@ -79,7 +89,8 @@ class DirectDeezerBackend:
             )
 
         try:
-            await asyncio.to_thread(
+            await self._prepare_downloads_dir()
+            await run_blocking(
                 self.downloads_dir.mkdir,
                 parents=True,
                 exist_ok=True,
@@ -93,7 +104,7 @@ class DirectDeezerBackend:
                 ),
             )
 
-        if not await asyncio.to_thread(
+        if not await run_blocking(
             self._directory_is_writable,
             self.downloads_dir,
         ):
@@ -120,6 +131,7 @@ class DirectDeezerBackend:
                 "task_id must not be empty"
             )
 
+        await self._prepare_downloads_dir()
         backend_id = uuid4().hex
 
         job = BackendJob(
@@ -213,8 +225,8 @@ class DirectDeezerBackend:
             if file.name != requested_name:
                 continue
 
-            if not self._is_within_downloads(
-                file
+            if not await run_blocking(
+                self._is_within_downloads, file
             ):
                 self.logger.warning(
                     "Refusing file outside downloads "
@@ -233,13 +245,12 @@ class DirectDeezerBackend:
     ) -> None:
         job = internal.job
 
-        job_dir = self._job_directory(job)
-
         try:
+            job_dir = await run_blocking(self._job_directory, job)
             internal.state = "downloading"
             internal.progress_percent = 0.0
 
-            await asyncio.to_thread(
+            await run_blocking(
                 job_dir.mkdir,
                 parents=True,
                 exist_ok=False,
@@ -256,14 +267,8 @@ class DirectDeezerBackend:
                 ),
             )
 
-            files = [
-                file.expanduser().resolve()
-                for file in files
-            ]
-
-            self._validate_completed_files(
-                job_dir,
-                files,
+            files = await run_blocking(
+                self._normalize_completed_files, job_dir, files,
             )
 
             internal.files = files
@@ -375,6 +380,15 @@ class DirectDeezerBackend:
             / job.backend_id
         ).resolve()
 
+    def _normalize_completed_files(
+        self,
+        job_dir: Path,
+        files: list[Path],
+    ) -> list[Path]:
+        resolved = [file.expanduser().resolve() for file in files]
+        self._validate_completed_files(job_dir, resolved)
+        return resolved
+
     def _validate_completed_files(
         self,
         job_dir: Path,
@@ -407,15 +421,11 @@ class DirectDeezerBackend:
         self,
         internal: _InternalJob,
     ) -> None:
-        directory = self._job_directory(
-            internal.job
-        )
+        def cleanup() -> None:
+            directory = self._job_directory(internal.job)
+            shutil.rmtree(directory, ignore_errors=True)
 
-        await asyncio.to_thread(
-            shutil.rmtree,
-            directory,
-            ignore_errors=True,
-        )
+        await run_blocking(cleanup)
 
         internal.files.clear()
 

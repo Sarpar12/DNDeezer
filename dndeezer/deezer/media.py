@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
 from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
+from dndeezer._async import run_blocking as _run_blocking
 from dndeezer.backend import DownloadTarget
 from dndeezer.deezer.client import DeezerClient, DeezerError
 from dndeezer.deezer.models import DeezerAlbum, DeezerSession
@@ -87,7 +88,7 @@ class DirectDeezerMediaService:
                 f"Deezer album {album_id} has no tracks"
             )
 
-        album_dir = self._album_directory(destination, album)
+        album_dir = await _run_blocking(self._album_directory, destination, album)
 
         total = len(tracks)
         width = max(2, len(str(total)))
@@ -196,31 +197,19 @@ class DirectDeezerMediaService:
             await _close_response(media_response)
 
         url, quality = _select_media_source(media_data)
-        cdn_response = await self.client._http.get(url, headers=CDN_HEADERS)
         temporary_path = destination / f".{used_id}.part"
         output_path = destination / _filename(track, quality, stem=stem)
 
         try:
-            cdn_response.raise_for_status()
-            total_bytes = _content_length(cdn_response)
-            written = 0
+            async with self.client._http.stream(
+                "GET", url, headers=CDN_HEADERS,
+            ) as cdn_response:
+                cdn_response.raise_for_status()
+                await _write_media(
+                    cdn_response, used_id, temporary_path, on_progress,
+                )
 
-            # NOTE: chunk decryption and disk writes run on the event loop
-            # here. Fine for local storage (sub-millisecond chunks); on a
-            # slow/NFS downloads_dir this can lag the host loop, and the
-            # fix is offloading decrypt+write batches via asyncio.to_thread
-            # (DroppedNeedle house rule).
-            with temporary_path.open("wb") as output:
-                async for chunk in _decrypted_chunks(
-                    cdn_response,
-                    used_id,
-                ):
-                    output.write(chunk)
-                    written += len(chunk)
-                    if on_progress and total_bytes:
-                        on_progress(min(written / total_bytes * 100, 100))
-
-            temporary_path.replace(output_path)
+            await _run_blocking(temporary_path.replace, output_path)
             if on_progress:
                 on_progress(100)
             return [output_path]
@@ -231,8 +220,7 @@ class DirectDeezerMediaService:
                 f"Failed to acquire track {used_id}: {exc}"
             ) from exc
         finally:
-            await _close_response(cdn_response)
-            temporary_path.unlink(missing_ok=True)
+            await _run_blocking(lambda: temporary_path.unlink(missing_ok=True))
 
     async def _page_data(
         self,
@@ -403,27 +391,77 @@ def _blowfish_key(track_id: int) -> bytes:
     )
 
 
+class _StripeDecoder:
+    def __init__(self, track_id: int) -> None:
+        self.decryptor = Cipher(
+            decrepit_algorithms.Blowfish(_blowfish_key(track_id)),
+            modes.CBC(BF_IV),
+        ).decryptor()
+        self.buffer = b""
+        self.index = 0
+
+    def update(self, piece: bytes) -> bytes:
+        data = self.buffer + piece
+        end = len(data) - len(data) % CHUNK_SIZE
+        output = bytearray()
+        for offset in range(0, end, CHUNK_SIZE):
+            chunk = data[offset:offset + CHUNK_SIZE]
+            if self.index % 3 == 0:
+                chunk = self.decryptor.update(chunk)
+            output.extend(chunk)
+            self.index += 1
+        self.buffer = data[end:]
+        return bytes(output)
+
+    def finish(self) -> bytes:
+        self.decryptor.finalize()
+        tail, self.buffer = self.buffer, b""
+        return tail
+
+
+async def _write_media(
+    response: Any,
+    track_id: int,
+    path: Path,
+    on_progress: ProgressCallback | None,
+) -> None:
+    output = None
+    decoder = None
+
+    def open_output() -> None:
+        nonlocal output, decoder
+        decoder = _StripeDecoder(track_id)
+        output = path.open("wb")
+
+    def write_batch(piece: bytes) -> int:
+        data = decoder.update(piece)
+        output.write(data)
+        return len(data)
+
+    def finish() -> None:
+        output.write(decoder.finish())
+
+    try:
+        await _run_blocking(open_output)
+        total_bytes = _content_length(response)
+        written = 0
+        # One awaited worker batch at a time bounds memory and preserves cipher
+        # order. Progress callbacks stay on the host's event-loop thread.
+        async for piece in _response_chunks(response):
+            written += await _run_blocking(write_batch, piece)
+            if on_progress and total_bytes:
+                on_progress(min(written / total_bytes * 100, 100))
+        await _run_blocking(finish)
+    finally:
+        if output is not None:
+            await _run_blocking(output.close)
+
+
 async def _decrypted_chunks(response: Any, track_id: int) -> AsyncIterator[bytes]:
-    decryptor = Cipher(
-        decrepit_algorithms.Blowfish(_blowfish_key(track_id)),
-        modes.CBC(BF_IV),
-    ).decryptor()
-    buffer = b""
-    index = 0
-
+    decoder = await _run_blocking(_StripeDecoder, track_id)
     async for piece in _response_chunks(response):
-        buffer += piece
-        while len(buffer) >= CHUNK_SIZE:
-            chunk, buffer = buffer[:CHUNK_SIZE], buffer[CHUNK_SIZE:]
-            if index % 3 == 0:
-                chunk = decryptor.update(chunk)
-            yield chunk
-            index += 1
-
-    if buffer:
-        yield buffer
-
-    decryptor.finalize()
+        yield await _run_blocking(decoder.update, piece)
+    yield await _run_blocking(decoder.finish)
 
 
 async def _response_chunks(response: Any) -> AsyncIterator[bytes]:
@@ -445,4 +483,4 @@ async def _close_response(response: Any) -> None:
         return
     close = getattr(response, "close", None)
     if close is not None:
-        close()
+        await _run_blocking(close)

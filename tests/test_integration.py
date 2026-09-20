@@ -4,6 +4,7 @@ service, and backend, with only the HTTP transport faked."""
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -47,6 +48,11 @@ class FakeHttp:
     async def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return self.get_queue.pop(0)
+
+    @asynccontextmanager
+    async def stream(self, method, url, **kwargs):
+        assert method == "GET"
+        yield await self.get(url, **kwargs)
 
     async def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
