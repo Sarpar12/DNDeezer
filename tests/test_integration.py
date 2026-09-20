@@ -96,10 +96,12 @@ def _get_url_media(track_id):
 
 
 def _queue_track(http, track_id):
+    from flac_fixture import SILENT_FLAC
+
     http.queue_get(_track_json(track_id))
     http.queue_post(_page_track())
     http.queue_post(_get_url_media(track_id))
-    http.queue_get(FakeResponse(pieces=[]))
+    http.queue_get(FakeResponse(pieces=[SILENT_FLAC]))
 
 
 def _make_backend(http, tmp_path):

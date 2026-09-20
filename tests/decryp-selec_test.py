@@ -47,6 +47,13 @@ def test_blowfish_key_is_sixteen_bytes():
     assert len(_blowfish_key(1)) == 16
 
 
+@pytest.fixture(autouse=True)
+def isolate_tagging_from_synthetic_cipher_tests(monkeypatch):
+    # These tests intentionally stream arbitrary bytes, not valid FLAC audio.
+    # Real tagging is covered by test_metadata and the integration pipeline.
+    monkeypatch.setattr("dndeezer.deezer.media.write_flac_metadata", lambda *a, **kw: None)
+
+
 def test_blowfish_key_differs_per_track():
     assert _blowfish_key(3135555) != _blowfish_key(3135556)
 

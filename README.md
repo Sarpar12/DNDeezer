@@ -63,7 +63,8 @@ database maintenance.
   `needs_attention` attempts may still require reconciliation or manual cleanup.
 - Old handles lost before persistence was introduced cannot be reconstructed
   automatically.
-- No metadata or cover-art embedding; files are written as raw decrypted audio.
+- FLAC files receive embedded Deezer text metadata; cover-art embedding and
+  MP3 tagging are not implemented.
 - The plugin requires host modules that are not part of this repository; the
   test suite stubs them via `tests/conftest.py`. Search and download boundary
   types use the public `infrastructure.plugins.protocols` surface.

@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, modes
 from dndeezer._async import run_blocking as _run_blocking
 from dndeezer.backend import DownloadTarget
 from dndeezer.deezer.client import DeezerClient, DeezerError
+from dndeezer.deezer.metadata import write_flac_metadata
 from dndeezer.deezer.models import DeezerAlbum, DeezerSession
 
 ProgressCallback = Callable[[float], None]
@@ -105,6 +106,8 @@ class DirectDeezerMediaService:
                     _track_id(track),
                     album_dir,
                     session=session,
+                    album=album,
+                    position=position,
                     stem=f"{position:0{width}d} - {track.get('title') or 'track'}",
                     on_progress=_wrap_album_progress(
                         on_progress,
@@ -154,6 +157,8 @@ class DirectDeezerMediaService:
         on_progress: ProgressCallback | None = None,
         session: DeezerSession | None = None,
         stem: str | None = None,
+        album: DeezerAlbum | None = None,
+        position: int | None = None,
     ) -> list[Path]:
         if session is None:
             session = await self.client.authenticate()
@@ -231,6 +236,11 @@ class DirectDeezerMediaService:
                     cdn_response, used_id, temporary_path, on_progress,
                 )
 
+            if quality == "FLAC":
+                await _run_blocking(
+                    write_flac_metadata, temporary_path, track,
+                    album=album, position=position,
+                )
             await _run_blocking(temporary_path.replace, output_path)
             if on_progress:
                 on_progress(100)
