@@ -103,7 +103,9 @@ used for media is retained because it is also used to derive the decryption key.
 The URL response is checked in quality order: FLAC, MP3 320, then MP3 128.
 Only the `BF_CBC_STRIPE` cipher is accepted. The CDN response is streamed, and
 the output is only reported as complete after all transformed bytes have been
-written.
+written. Decryption and disk writes run in sequential worker-thread batches,
+keeping blocking work off the host event loop. Cancellation waits for the
+current batch before closing the file and removing the temporary output.
 
 ### Album downloads
 
@@ -173,7 +175,7 @@ The project is managed with [uv](https://docs.astral.sh/uv/) (Python 3.13):
 ```sh
 uv sync --frozen        # install locked dependencies, including dev group
 uv run ruff check .     # lint
-uv run pytest tests/ -q # test suite (118 tests)
+uv run pytest tests/ -q # test suite
 ```
 
 The pipeline tests fake only the HTTP transport, so the client, media service,
