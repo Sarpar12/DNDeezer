@@ -55,6 +55,15 @@ database maintenance.
 
 ## Known limitations
 
+- For requests with one expected track, the plugin expands album search results
+  into individual track candidates, each with a filename and `track:<id>` payload.
+  This lets the host match a missing song without downloading an entire album,
+  and also supports genuine one-track releases. Tracklist lookups share the
+  search timeout; unavailable albums are skipped rather than offered as whole
+  album downloads. This requires the host's per-file plugin matching support.
+- After updating plugin code, restart the DroppedNeedle container. Reloading
+  only the plugin entrypoint can leave imported Python modules cached.
+
 - **Automatic cleanup requires the host-side fix in
   [DroppedNeedle PR #478](https://github.com/DroppedNeedle/DroppedNeedle/pull/478)
   or an equivalent fix.** Hosts with the old cleanup routing can reject plugin
