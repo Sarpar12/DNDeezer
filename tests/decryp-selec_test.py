@@ -727,9 +727,20 @@ def _alt_track(track_id=7, title="Song", artist="Someone"):
     }
 
 
+def _readable_candidate(track_id, title="Song", artist="Someone", **extra):
+    return FakeResponse({
+        "id": track_id,
+        "readable": True,
+        "title": title,
+        "artist": {"name": artist},
+        **extra,
+    })
+
+
 @pytest.mark.asyncio
 async def test_find_alternative_uses_fallback_id():
-    service, _ = _make_service()
+    service, http = _make_service()
+    http.queue_get(_readable_candidate(8))
 
     result = await service._find_alternative(
         _alt_track(7),
@@ -737,6 +748,22 @@ async def test_find_alternative_uses_fallback_id():
     )
 
     assert result == 8
+
+
+@pytest.mark.asyncio
+async def test_find_alternative_rejects_unreadable_fallback_id():
+    # A page FALLBACK id is only a pointer; it must itself be readable
+    # before its media can be requested.
+    service, http = _make_service()
+    http.queue_get(FakeResponse({"id": 8, "readable": False}))
+    http.queue_get(FakeResponse({"data": []}))
+
+    result = await service._find_alternative(
+        _alt_track(7),
+        {"FALLBACK": {"SNG_ID": "8"}},
+    )
+
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -771,6 +798,7 @@ async def test_find_alternative_ignores_fallback_equal_to_original():
 async def test_find_alternative_isrc_uses_dedicated_endpoint():
     service, http = _make_service()
     http.queue_get(FakeResponse({"id": 55, "readable": True}))
+    http.queue_get(_readable_candidate(55, isrc="FRAB90000001"))
 
     result = await service._find_alternative(
         _alt_track(7),
@@ -784,6 +812,7 @@ async def test_find_alternative_isrc_uses_dedicated_endpoint():
 @pytest.mark.asyncio
 async def test_find_alternative_skips_unreadable_isrc_match():
     service, http = _make_service()
+    http.queue_get(FakeResponse({"id": 55}))
     http.queue_get(FakeResponse({"id": 55, "readable": False}))
     http.queue_get(FakeResponse({"data": []}))
 
@@ -810,15 +839,63 @@ async def test_find_alternative_skips_isrc_match_equal_to_original():
 
 
 @pytest.mark.asyncio
-async def test_find_alternative_falls_back_to_artist_title_search():
+async def test_find_alternative_falls_back_to_matching_search_result():
     service, http = _make_service()
     http.queue_get(FakeResponse({"data": [{"id": 42}]}))
+    http.queue_get(_readable_candidate(42))
 
     result = await service._find_alternative(_alt_track(7), {})
 
     assert result == 42
     assert http.get_calls[0][0] == "https://api.deezer.com/search/track"
-    assert http.get_calls[0][1]["params"] == {"q": "Someone Song", "limit": 1}
+    assert http.get_calls[0][1]["params"] == {"q": "Someone Song", "limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_find_alternative_rejects_different_song_search_match():
+    # Live regression: requesting CHOOM made Deezer search return MOON
+    # first; accepting it downloaded a different song under the requested
+    # filename, which then failed host verification.
+    service, http = _make_service()
+    http.queue_get(FakeResponse({"data": [{"id": 3986645031}]}))
+    http.queue_get(_readable_candidate(
+        3986645031, title="MOON", artist="BABYMONSTER",
+    ))
+
+    result = await service._find_alternative(
+        _alt_track(3986645071, title="CHOOM", artist="BABYMONSTER"),
+        {},
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_alternative_rejects_unreadable_search_match():
+    service, http = _make_service()
+    http.queue_get(FakeResponse({"data": [{"id": 42}]}))
+    http.queue_get(FakeResponse({
+        "id": 42,
+        "readable": False,
+        "title": "Song",
+        "artist": {"name": "Someone"},
+    }))
+
+    result = await service._find_alternative(_alt_track(7), {})
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_alternative_search_skips_to_matching_title():
+    service, http = _make_service()
+    http.queue_get(FakeResponse({"data": [{"id": 41}, {"id": 42}]}))
+    http.queue_get(_readable_candidate(41, title="Other Song"))
+    http.queue_get(_readable_candidate(42))
+
+    result = await service._find_alternative(_alt_track(7), {})
+
+    assert result == 42
 
 
 @pytest.mark.asyncio

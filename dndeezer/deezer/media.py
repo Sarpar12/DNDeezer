@@ -6,7 +6,9 @@ import json
 import logging
 import random
 import re
+import unicodedata
 from collections.abc import AsyncIterator, Callable
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -332,6 +334,15 @@ class DirectDeezerMediaService:
         track: dict[str, Any],
         page_data: dict[str, Any],
     ) -> int | None:
+        """Resolve a readable rendition of the requested song, never another song.
+
+        An unreadable track (common for region-locked releases) may have an
+        explicit ID whose media is licensed. Deezer's page FALLBACK and the
+        ISRC endpoint are reliable pointers; the title search is not, so every
+        candidate must be readable and the same recording before it is used.
+        Accepting a loose search match downloads a different song under the
+        requested filename and fails host verification.
+        """
         original_id = track.get("id")
 
         fallback = (page_data.get("FALLBACK") or {}).get("SNG_ID")
@@ -341,37 +352,99 @@ class DirectDeezerMediaService:
             except (TypeError, ValueError):
                 fallback_id = None
             if fallback_id and fallback_id != original_id:
-                return fallback_id
+                candidate = await self._candidate_track(fallback_id)
+                if candidate is not None:
+                    if not candidate.get("readable", False):
+                        logger.warning(
+                            "Deezer alternative rejected as unreadable: track_id=%s "
+                            "candidate_id=%s", original_id, fallback_id,
+                        )
+                    else:
+                        logger.info(
+                            "Deezer alternative accepted: track_id=%s candidate_id=%s",
+                            original_id, fallback_id,
+                        )
+                        return fallback_id
 
-        isrc = page_data.get("ISRC") or track.get("isrc")
+        isrc = str(page_data.get("ISRC") or track.get("isrc") or "")
         if isrc:
-            candidate = await self._readable_track_by_isrc(str(isrc))
-            if candidate and candidate != original_id:
-                return candidate
+            candidate_id = await self._track_id_by_isrc(isrc)
+            if candidate_id and candidate_id != original_id:
+                candidate = await self._candidate_track(candidate_id)
+                if candidate is None:
+                    return None
+                if not candidate.get("readable", False):
+                    logger.warning(
+                        "Deezer alternative rejected as unreadable: track_id=%s "
+                        "candidate_id=%s isrc=%s", original_id, candidate_id, isrc,
+                    )
+                elif str(candidate.get("isrc") or "") == isrc:
+                    # Same ISRC is the same recording by definition.
+                    logger.info(
+                        "Deezer alternative accepted: track_id=%s candidate_id=%s "
+                        "isrc=%s", original_id, candidate_id, isrc,
+                    )
+                    return candidate_id
+                else:
+                    logger.warning(
+                        "Deezer alternative rejected for ISRC mismatch: track_id=%s "
+                        "candidate_id=%s isrc=%s candidate_isrc=%s",
+                        original_id, candidate_id, isrc, candidate.get("isrc"),
+                    )
 
         artist = (track.get("artist") or {}).get("name", "")
-        query = f"{artist} {track.get('title', '')}".strip()
+        title = str(track.get("title", ""))
+        query = f"{artist} {title}".strip()
         if query:
             results = await self.client._get(
                 "/search/track",
-                params={"q": query, "limit": 1},
+                params={"q": query, "limit": 5},
             )
             matches = results.get("data")
-            if isinstance(matches, list) and matches:
-                candidate = _track_id(matches[0])
-                if candidate != original_id:
-                    return candidate
+            if isinstance(matches, list):
+                for match in matches:
+                    try:
+                        candidate_id = _track_id(match)
+                    except MediaAcquisitionError:
+                        continue
+                    if candidate_id == original_id:
+                        continue
+                    candidate = await self._candidate_track(candidate_id)
+                    if candidate is None or not candidate.get("readable", False):
+                        continue
+                    if not _same_recording(track, candidate):
+                        logger.info(
+                            "Deezer search alternative rejected as a different "
+                            "recording: track_id=%s candidate_id=%s "
+                            "candidate_title=%r",
+                            original_id, candidate_id, candidate.get("title"),
+                        )
+                        continue
+                    logger.info(
+                        "Deezer alternative accepted: track_id=%s candidate_id=%s",
+                        original_id, candidate_id,
+                    )
+                    return candidate_id
+        logger.warning(
+            "Deezer found no readable alternative: track_id=%s artist=%r title=%r",
+            original_id, artist, title,
+        )
         return None
 
-    async def _readable_track_by_isrc(self, isrc: str) -> int | None:
+    async def _candidate_track(self, track_id: int) -> dict[str, Any] | None:
+        try:
+            data = await self.client._get(f"/track/{track_id}")
+        except DeezerError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def _track_id_by_isrc(self, isrc: str) -> int | None:
         try:
             data = await self.client._get(f"/track/isrc:{isrc}")
         except DeezerError:
             return None
 
         if not isinstance(data, dict) or data.get("error"):
-            return None
-        if not data.get("readable", False):
             return None
         try:
             return _track_id(data)
@@ -472,6 +545,39 @@ def _select_media_source(data: Any) -> tuple[str, str]:
         quality = next(iter(available))
         return available[quality], quality
     raise MediaAcquisitionError("Deezer returned no media sources")
+
+
+def _same_recording(original: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """True when a fallback candidate is plausibly the same song, not a
+    similarly titled track by the same artist."""
+    def norm(value: str) -> str:
+        normalized = unicodedata.normalize("NFKD", value.casefold())
+        return "".join(char for char in normalized if char.isalnum())
+
+    def artist_name(track: dict[str, Any]) -> str:
+        return str((track.get("artist") or {}).get("name", ""))
+
+    original_artist = norm(artist_name(original))
+    candidate_artist = norm(artist_name(candidate))
+    original_title = norm(str(original.get("title", "")))
+    candidate_title = norm(str(candidate.get("title", "")))
+
+    if not original_title or not candidate_artist:
+        return False
+
+    if (original_artist, original_title) == (candidate_artist, candidate_title):
+        return True
+
+    return (
+        _similarity(original_artist, candidate_artist) >= 0.85
+        and _similarity(original_title, candidate_title) >= 0.85
+    )
+
+
+def _similarity(left: str, right: str) -> float:
+    if left == right:
+        return 1.0
+    return SequenceMatcher(None, left, right).ratio()
 
 
 def _safe_component(value: str) -> str:
