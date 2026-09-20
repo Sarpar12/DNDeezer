@@ -13,7 +13,7 @@ from infrastructure.plugins.protocols import (
 # DroppedNeedle v2.13.0 does not re-export ServiceStatus in the public API.
 from models.common import ServiceStatus
 
-from .deezer.client import DeezerClient
+from .deezer.client import DeezerClient, _parse_track
 from .deezer.media import _filename
 from .deezer.models import DeezerAlbum, DeezerTrack
 
@@ -144,7 +144,13 @@ class DeezerIndexer:
                             album_id, type(exc).__name__, exc,
                         )
                         continue
-                    for track in tracks:
+                    for data in tracks:
+                        # Album tracklist endpoints return raw dictionaries and
+                        # commonly omit the parent album metadata.
+                        track = _parse_track({
+                            **data,
+                            "album": {"id": album.id, "title": album.title},
+                        })
                         if track.id in seen:
                             continue
                         seen.add(track.id)
