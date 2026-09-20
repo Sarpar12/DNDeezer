@@ -11,6 +11,7 @@ imports whole releases through ``list_completed_files``.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -36,9 +37,9 @@ JOB_NAME_PREFIX = "droppedneedle-"
 class DeezerDownloadClient:
     """Host download-client surface backed by ``DirectDeezerBackend``.
 
-    ``TaskHandle`` has no field for internal job id, so handles are
-    correlated by ``job_name`` (the engine's own
-    ``droppedneedle-<task_id>`` convention). The map is in-memory: after a
+    Handles are correlated by an attempt-specific ``job_name``. Preserve the
+    host's candidate suffix and never reuse a name for another backend job.
+    The map is in-memory: after a
     host restart the asyncio jobs are gone too, so unknown handles are
     reported as failed instead of hanging the engine.
     """
@@ -47,6 +48,7 @@ class DeezerDownloadClient:
         self.ctx = context
         self._backend: DirectDeezerBackend | None = None
         self._handles: dict[str, BackendJob] = {}
+        self._issued_handle_names: set[str] = set()
 
     # -- config helpers --
 
@@ -112,9 +114,13 @@ class DeezerDownloadClient:
             target=target,
         )
 
+        job_name = request.job_name or f"{JOB_NAME_PREFIX}{request.task_id}"
+        if job_name in self._issued_handle_names:
+            job_name = f"{job_name}-{job.backend_id}"
+        self._issued_handle_names.add(job_name)
         handle = TaskHandle(
             source=SOURCE,
-            job_name=f"{JOB_NAME_PREFIX}{request.task_id}",
+            job_name=job_name,
             filenames=[],  # folder mode
             plugin_token=payload,
         )
@@ -193,26 +199,41 @@ class DeezerDownloadClient:
         backend = self._get_backend()
         status = await backend.get_status(job)
         workspace = str(backend.downloads_dir / job.backend_id)
+        mount_healthy = await run_blocking(self._mount_healthy, backend.downloads_dir)
+        evidence = {
+            "mount_root": str(backend.downloads_dir),
+            "mount_healthy": mount_healthy,
+            "workspace_path": workspace,
+        }
 
         if status.state == "completed":
             files = await backend.list_completed_files(job)
 
             return DownloadMaterialization(
                 state="completed",
-                workspace_path=workspace,
                 file_paths=[str(file) for file in files],
+                **evidence,
             )
 
         if status.state in ("failed", "cancelled"):
             return DownloadMaterialization(
                 state="failed",
-                workspace_path=workspace,
+                **evidence,
             )
 
         return DownloadMaterialization(
             state="active",
-            workspace_path=workspace,
+            **evidence,
         )
+
+    @staticmethod
+    def _mount_healthy(directory: Path) -> bool:
+        try:
+            with os.scandir(directory) as entries:
+                next(entries, None)
+            return True
+        except OSError:
+            return False
 
     async def discard_client_artifacts(self, handle: TaskHandle) -> bool:
         job = self._resolve(handle)
@@ -261,20 +282,11 @@ class DeezerDownloadClient:
     # -- handle correlation --
 
     def _resolve(self, handle: TaskHandle) -> BackendJob | None:
-        job = self._handles.get(getattr(handle, "job_name", "") or "")
-        if job is not None:
-            return job
-
-        # Recover by task id when the persisted job_name survived but the
-        # map was rebuilt (e.g. tests or handle round-trips).
-        job_name = getattr(handle, "job_name", "") or ""
-        if job_name.startswith(JOB_NAME_PREFIX):
-            task_id = job_name.removeprefix(JOB_NAME_PREFIX)
-            for entry in self._handles.values():
-                if entry.task_id == task_id:
-                    return entry
-
-        return None
+        # Task IDs and payloads can be shared by retries. Only the exact handle
+        # identifies the attempt whose files the host is allowed to clean up.
+        if handle.source != SOURCE:
+            return None
+        return self._handles.get(getattr(handle, "job_name", "") or "")
 
     @staticmethod
     def _task_id_for(handle: TaskHandle, job: BackendJob | None) -> str:
