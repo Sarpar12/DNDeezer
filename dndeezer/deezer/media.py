@@ -462,10 +462,10 @@ def _blowfish_key(track_id: int) -> bytes:
 
 class _StripeDecoder:
     def __init__(self, track_id: int) -> None:
-        self.decryptor = Cipher(
+        self.cipher = Cipher(
             decrepit_algorithms.Blowfish(_blowfish_key(track_id)),
             modes.CBC(BF_IV),
-        ).decryptor()
+        )
         self.buffer = b""
         self.index = 0
 
@@ -476,14 +476,16 @@ class _StripeDecoder:
         for offset in range(0, end, CHUNK_SIZE):
             chunk = data[offset:offset + CHUNK_SIZE]
             if self.index % 3 == 0:
-                chunk = self.decryptor.update(chunk)
+                # Each encrypted stripe starts a new CBC message with BF_IV.
+                # Chaining across stripes corrupts the next stripe's first block.
+                decryptor = self.cipher.decryptor()
+                chunk = decryptor.update(chunk) + decryptor.finalize()
             output.extend(chunk)
             self.index += 1
         self.buffer = data[end:]
         return bytes(output)
 
     def finish(self) -> bytes:
-        self.decryptor.finalize()
         tail, self.buffer = self.buffer, b""
         return tail
 
